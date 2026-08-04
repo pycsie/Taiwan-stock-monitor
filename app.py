@@ -24,36 +24,29 @@ BUILTIN_STOCKS = {
     "00878": "國泰永續高股息", "00919": "群益台灣精選高息", "00929": "復華台灣科技優息"
 }
 
-# --- 1. Google Sheets 資料庫連線與讀寫函數 (不使用 Cache 以確保即時性) ---
+# --- 1. Google Sheets 資料庫連線與讀寫函數 ---
 def get_gsheet_connection():
-    """ 建立 Google Sheets 連線 """
     return st.connection("gsheets", type=GSheetsConnection)
 
 def load_settings_from_gsheets():
-    """ 直接從 Google Sheets 撈取最新資料 """
     try:
         conn = get_gsheet_connection()
-        # 強制讀取 Watchlist 工作表
         df = conn.read(worksheet="Watchlist", ttl=0)
         
         if df is None or df.empty:
             return ["2330", "0050"], {"2330": ['20MA', '60MA', '240MA'], "0050": ALL_MAS.copy()}
             
-        df = df.dropna(how='all') # 移除空白行
+        df = df.dropna(how='all')
         
         watchlist = []
         ma_settings = {}
         
         for _, row in df.iterrows():
-            # 處理 Stock 欄位
             stock_val = row.get('Stock', '')
             if pd.notna(stock_val):
-                # 轉成字串並去除 .TW/.TWO
                 code = str(stock_val).split('.')[0].strip()
                 if code and code.isalnum():
                     watchlist.append(code)
-                    
-                    # 處理 MAs 欄位
                     mas_val = row.get('MAs', '')
                     mas_str = str(mas_val) if pd.notna(mas_val) else ""
                     mas_list = [m.strip() for m in mas_str.split(",") if m.strip() in ALL_MAS]
@@ -69,7 +62,6 @@ def load_settings_from_gsheets():
         return ["2330", "0050"], {"2330": ['20MA', '60MA', '240MA'], "0050": ALL_MAS.copy()}
 
 def save_settings_to_gsheets(watchlist, ma_settings):
-    """ 將最新的股票與均線設定寫回 Google Sheets """
     try:
         conn = get_gsheet_connection()
         rows = []
@@ -85,12 +77,11 @@ def save_settings_to_gsheets(watchlist, ma_settings):
         st.error(f"❌ 寫入 Google Sheets 失敗: {e}")
         return False
 
-# --- 2. 每次重新整理都從 Google Sheets 重新載入，避免記憶體死鎖 ---
+# --- 2. 載入最新設定 ---
 db_watchlist, db_ma_settings = load_settings_from_gsheets()
 st.session_state.watchlist = db_watchlist
 st.session_state.ma_settings = db_ma_settings
 
-# 讀取 Secrets LINE 設定
 default_token = st.secrets.get("LINE_CHANNEL_ACCESS_TOKEN", "") if "LINE_CHANNEL_ACCESS_TOKEN" in st.secrets else st.session_state.get("line_token", "")
 default_user_id = st.secrets.get("LINE_USER_ID", "") if "LINE_USER_ID" in st.secrets else st.session_state.get("line_user_id", "")
 
@@ -156,27 +147,44 @@ def send_line_message(token, user_id, text):
     except Exception as e:
         return False, f"發送異常: {str(e)}"
 
+# 🔥 核心修復：解決 NaN 與 MultiIndex 問題
 @st.cache_data(ttl=300)
 def load_stock_data(stock_id):
     clean_id = str(stock_id).replace(".TW", "").replace(".TWO", "").strip()
-    symbol = f"{clean_id}.TW"
-    try:
-        data = yf.download(symbol, period="2y", interval="1d", progress=False)
-        if data.empty:
-            data = yf.download(f"{clean_id}.TWO", period="2y", interval="1d", progress=False)
-        if isinstance(data.columns, pd.MultiIndex):
-            data.columns = data.columns.get_level_values(0)
-        if data.empty:
-            return None
-        data['5MA'] = data['Close'].rolling(5).mean()
-        data['10MA'] = data['Close'].rolling(10).mean()
-        data['20MA'] = data['Close'].rolling(20).mean()
-        data['60MA'] = data['Close'].rolling(60).mean()
-        data['120MA'] = data['Close'].rolling(120).mean()
-        data['240MA'] = data['Close'].rolling(240).mean()
-        return data
-    except Exception:
-        return None
+    
+    # 依序嘗試上市 (.TW) 與 上櫃 (.TWO)
+    for suffix in [".TW", ".TWO"]:
+        symbol = f"{clean_id}{suffix}"
+        try:
+            data = yf.download(symbol, period="2y", interval="1d", progress=False)
+            
+            if data is None or data.empty:
+                continue
+                
+            # 1. 處理 yfinance 的雙層欄位格式
+            if isinstance(data.columns, pd.MultiIndex):
+                data.columns = data.columns.get_level_values(0)
+                
+            # 2. 過濾未開盤或包含 NaN 的歷史資料列，確保 Close 是有效價格
+            if 'Close' in data.columns:
+                data = data.dropna(subset=['Close'])
+                
+            if data.empty or len(data) < 5:
+                continue
+                
+            # 3. 計算 6 大均線
+            data['5MA'] = data['Close'].rolling(5).mean()
+            data['10MA'] = data['Close'].rolling(10).mean()
+            data['20MA'] = data['Close'].rolling(20).mean()
+            data['60MA'] = data['Close'].rolling(60).mean()
+            data['120MA'] = data['Close'].rolling(120).mean()
+            data['240MA'] = data['Close'].rolling(240).mean()
+            
+            return data
+        except Exception:
+            continue
+            
+    return None
 
 # --- 5. 主介面 Tabs ---
 tab1, tab2 = st.tabs(["⭐ 我的最愛與自訂均線 (DB連動)", "🔍 單一個股圖表細節"])
@@ -199,7 +207,6 @@ with tab1:
                 if clean_new not in st.session_state.watchlist:
                     st.session_state.watchlist.append(clean_new)
                     st.session_state.ma_settings[clean_new] = ALL_MAS.copy()
-                    # 即時寫入 Google Sheets
                     save_settings_to_gsheets(st.session_state.watchlist, st.session_state.ma_settings)
                     st.success(f"已新增 {clean_new} 並成功寫入 Google Sheets！")
                     st.rerun()
@@ -249,33 +256,44 @@ with tab1:
                 
                 if df_code is not None and not df_code.empty:
                     last_row = df_code.iloc[-1]
-                    price = float(last_row['Close'])
-                    target_mas = st.session_state.ma_settings.get(code, ALL_MAS)
-                    triggered_info = []
+                    raw_price = last_row['Close']
                     
-                    for ma_key in target_mas:
-                        if ma_key in last_row and pd.notna(last_row[ma_key]):
-                            ma_val = float(last_row[ma_key])
-                            diff = ((price - ma_val) / ma_val) * 100
-                            if abs(diff) <= alert_threshold:
-                                pos = "站上" if diff >= 0 else "跌破"
-                                triggered_info.append(f"{MA_LABELS[ma_key]}({abs(diff):.1f}%)")
-                                all_alerts.append(
-                                    f"• **{stock_label}** 現價 {price:.2f} 靠近 **{MA_LABELS[ma_key]}** ({ma_val:.2f})，差距 {abs(diff):.1f}% ({pos})"
-                                )
+                    # 再次確認收盤價非 NaN 且可轉為 float
+                    if pd.notna(raw_price):
+                        price = float(raw_price)
+                        target_mas = st.session_state.ma_settings.get(code, ALL_MAS)
+                        triggered_info = []
+                        
+                        for ma_key in target_mas:
+                            if ma_key in last_row and pd.notna(last_row[ma_key]):
+                                ma_val = float(last_row[ma_key])
+                                diff = ((price - ma_val) / ma_val) * 100
+                                if abs(diff) <= alert_threshold:
+                                    pos = "站上" if diff >= 0 else "跌破"
+                                    triggered_info.append(f"{MA_LABELS[ma_key]}({abs(diff):.1f}%)")
+                                    all_alerts.append(
+                                        f"• **{stock_label}** 現價 {price:.2f} 靠近 **{MA_LABELS[ma_key]}** ({ma_val:.2f})，差距 {abs(diff):.1f}% ({pos})"
+                                    )
 
-                    summary_data.append({
-                        "股票名稱 (代號)": stock_label,
-                        "收盤價": f"{price:.2f}",
-                        "監控中的均線": ", ".join([MA_LABELS.get(m, m) for m in target_mas]),
-                        "符合警示的均線": ", ".join(triggered_info) if triggered_info else "無接近"
-                    })
+                        summary_data.append({
+                            "股票名稱 (代號)": stock_label,
+                            "收盤價": f"{price:.2f}",
+                            "監控中的均線": ", ".join([MA_LABELS.get(m, m) for m in target_mas]),
+                            "符合警示的均線": ", ".join(triggered_info) if triggered_info else "無接近"
+                        })
+                    else:
+                        summary_data.append({
+                            "股票名稱 (代號)": stock_label,
+                            "收盤價": "價格無效",
+                            "監控中的均線": "-",
+                            "符合警示的均線": "數據缺失"
+                        })
                 else:
                     summary_data.append({
                         "股票名稱 (代號)": stock_label,
-                        "收盤價": "讀取失敗",
+                        "收盤價": "代號錯誤/無數據",
                         "監控中的均線": "-",
-                        "符合警示的均線": "數據獲取異常"
+                        "符合警示的均線": "無法抓取"
                     })
 
         if summary_data:
