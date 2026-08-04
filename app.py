@@ -17,6 +17,14 @@ MA_LABELS = {
     '60MA': '季線(60MA)', '120MA': '半年線(120MA)', '240MA': '年線(240MA)'
 }
 
+# 常用股票內建備援字典 (防止 twstock 連線失敗時股票名稱消失)
+BUILTIN_STOCKS = {
+    "2330": "台積電", "2317": "鴻海", "2454": "聯發科", "2308": "台達電",
+    "2382": "廣達", "2881": "富邦金", "2882": "國泰金", "2412": "中華電",
+    "2891": "中信金", "3711": "日月光投控", "0050": "元大台灣50", "0056": "元大高股息",
+    "00878": "國泰永續高股息", "00919": "群益台灣精選高息", "00929": "復華台灣科技優息"
+}
+
 # --- 1. Google Sheets 資料庫連線與讀寫函數 ---
 @st.cache_resource
 def get_gsheet_connection():
@@ -29,22 +37,32 @@ def load_settings_from_gsheets():
         conn = get_gsheet_connection()
         # ttl=0 確保每次載入最新試算表內容
         df = conn.read(worksheet="Watchlist", ttl=0)
-        df = df.dropna(how='all') # 移除空行
+        
+        if df is None or df.empty:
+            return ["2330", "0050"], {"2330": ['20MA', '60MA', '240MA'], "0050": ALL_MAS.copy()}
+            
+        df = df.dropna(how='all') # 移除全空白行
         
         watchlist = []
         ma_settings = {}
         
         for _, row in df.iterrows():
-            code = str(row['Stock']).replace(".TW", "").replace(".TWO", "").strip()
-            if code:
-                watchlist.append(code)
-                mas_str = str(row['MAs']) if pd.notna(row['MAs']) else ""
-                mas_list = [m.strip() for m in mas_str.split(",") if m.strip() in ALL_MAS]
-                ma_settings[code] = mas_list if mas_list else ALL_MAS.copy()
-                
+            if 'Stock' in row and pd.notna(row['Stock']):
+                code = str(row['Stock']).replace(".TW", "").replace(".TWO", "").strip()
+                # 過濾純數字或合法代號
+                if code and code.isalnum():
+                    watchlist.append(code)
+                    mas_str = str(row['MAs']) if ('MAs' in row and pd.notna(row['MAs'])) else ""
+                    mas_list = [m.strip() for m in mas_str.split(",") if m.strip() in ALL_MAS]
+                    ma_settings[code] = mas_list if mas_list else ALL_MAS.copy()
+                    
+        if not watchlist:
+            watchlist = ["2330", "0050"]
+            ma_settings = {"2330": ['20MA', '60MA', '240MA'], "0050": ALL_MAS.copy()}
+            
         return watchlist, ma_settings
     except Exception as e:
-        st.error(f"Google Sheets 讀取失敗，使用預設值。錯誤訊息: {e}")
+        st.warning(f"💡 雲端試算表讀取提示: 使用預設清單中 ({str(e)})")
         return ["2330", "0050"], {"2330": ['20MA', '60MA', '240MA'], "0050": ALL_MAS.copy()}
 
 def save_settings_to_gsheets(watchlist, ma_settings):
@@ -55,22 +73,22 @@ def save_settings_to_gsheets(watchlist, ma_settings):
         for code in watchlist:
             mas = ma_settings.get(code, ALL_MAS)
             mas_str = ", ".join(mas)
-            rows.append({"Stock": code, "MAs": mas_str})
+            rows.append({"Stock": str(code), "MAs": mas_str})
             
         new_df = pd.DataFrame(rows)
         conn.update(worksheet="Watchlist", data=new_df)
         return True
     except Exception as e:
-        st.error(f"同步至 Google Sheets 失敗: {e}")
+        st.error(f"❌ 同步至 Google Sheets 失敗: {e}")
         return False
 
 # --- 2. 初始化 Session State (與 DB 同步) ---
-if "watchlist" not in st.session_state:
+if "watchlist" not in st.session_state or "ma_settings" not in st.session_state:
     db_watchlist, db_ma_settings = load_settings_from_gsheets()
     st.session_state.watchlist = db_watchlist
     st.session_state.ma_settings = db_ma_settings
 
-# 讀取 LINE 權限
+# 讀取 Secrets LINE 設定
 default_token = st.secrets.get("LINE_CHANNEL_ACCESS_TOKEN", "") if "LINE_CHANNEL_ACCESS_TOKEN" in st.secrets else st.session_state.get("line_token", "")
 default_user_id = st.secrets.get("LINE_USER_ID", "") if "LINE_USER_ID" in st.secrets else st.session_state.get("line_user_id", "")
 
@@ -103,9 +121,23 @@ if st.sidebar.button("🔄 強制從 Google Sheets 重新載入"):
 # --- 4. 工具函數 ---
 @st.cache_data(ttl=86400)
 def get_stock_name(code):
+    """ 強健的股票名稱查詢機制 (三重防護) """
     clean_code = str(code).replace(".TW", "").replace(".TWO", "").strip()
-    if clean_code in twstock.codes:
-        return twstock.codes[clean_code].name
+    
+    # 防護 1: 查詢內建常規字典
+    if clean_code in BUILTIN_STOCKS:
+        return BUILTIN_STOCKS[clean_code]
+        
+    # 防護 2: 查詢 twstock
+    try:
+        if clean_code in twstock.codes:
+            name = twstock.codes[clean_code].name
+            if name:
+                return name
+    except Exception:
+        pass
+        
+    # 防護 3: 查詢 yfinance
     try:
         symbol = f"{clean_code}.TW"
         info = yf.Ticker(symbol).info
@@ -114,18 +146,19 @@ def get_stock_name(code):
             return name
     except Exception:
         pass
+        
     return clean_code
 
 def get_stock_label(code):
     clean_code = str(code).replace(".TW", "").replace(".TWO", "").strip()
     name = get_stock_name(clean_code)
-    if name != clean_code:
+    if name and name != clean_code:
         return f"{name} ({clean_code})"
     return clean_code
 
 def send_line_message(token, user_id, text):
     if not token or not user_id:
-        return False, "請填寫完整的 LINE Token 與 User ID！"
+        return False, "請先填寫完整的 LINE Token 與 User ID！"
     url = "https://api.line.me/v2/bot/message/push"
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {token.strip()}"}
     payload = {"to": user_id.strip(), "messages": [{"type": "text", "text": text}]}
@@ -140,9 +173,9 @@ def load_stock_data(stock_id):
     clean_id = str(stock_id).replace(".TW", "").replace(".TWO", "").strip()
     symbol = f"{clean_id}.TW"
     try:
-        data = yf.download(symbol, period="2y", interval="1d")
+        data = yf.download(symbol, period="2y", interval="1d", progress=False)
         if data.empty:
-            data = yf.download(f"{clean_id}.TWO", period="2y", interval="1d")
+            data = yf.download(f"{clean_id}.TWO", period="2y", interval="1d", progress=False)
         if isinstance(data.columns, pd.MultiIndex):
             data.columns = data.columns.get_level_values(0)
         if data.empty:
@@ -161,7 +194,7 @@ def load_stock_data(stock_id):
 tab1, tab2 = st.tabs(["⭐ 我的最愛與自訂均線 (DB連動)", "🔍 單一個股圖表細節"])
 
 # ==========================================
-# Tab 1: 我的最愛管理
+# Tab 1: 我的最愛管理與對比警示
 # ==========================================
 with tab1:
     st.subheader("➕ 新增與管理關注個股 (自動同步至 Google Sheets)")
@@ -178,7 +211,6 @@ with tab1:
                 if clean_new not in st.session_state.watchlist:
                     st.session_state.watchlist.append(clean_new)
                     st.session_state.ma_settings[clean_new] = ALL_MAS.copy()
-                    # 寫入 Google Sheets
                     save_settings_to_gsheets(st.session_state.watchlist, st.session_state.ma_settings)
                     st.success(f"已新增 {clean_new} 並同步存至 Google Sheets！")
                     st.rerun()
@@ -211,7 +243,6 @@ with tab1:
                     st.session_state.ma_settings[code] = selected_mas
                     has_changed = True
 
-    # 均線勾選變動時自動同步 DB
     if has_changed:
         save_settings_to_gsheets(st.session_state.watchlist, st.session_state.ma_settings)
 
@@ -234,9 +265,8 @@ with tab1:
                     triggered_info = []
                     
                     for ma_key in target_mas:
-                        ma_val = last_row[ma_key]
-                        if pd.notna(ma_val):
-                            ma_val = float(ma_val)
+                        if ma_key in last_row and pd.notna(last_row[ma_key]):
+                            ma_val = float(last_row[ma_key])
                             diff = ((price - ma_val) / ma_val) * 100
                             if abs(diff) <= alert_threshold:
                                 pos = "站上" if diff >= 0 else "跌破"
@@ -248,24 +278,47 @@ with tab1:
                     summary_data.append({
                         "股票名稱 (代號)": stock_label,
                         "收盤價": f"{price:.2f}",
-                        "監控中的均線": ", ".join([MA_LABELS[m] for m in target_mas]),
+                        "監控中的均線": ", ".join([MA_LABELS.get(m, m) for m in target_mas]),
                         "符合警示的均線": ", ".join(triggered_info) if triggered_info else "無接近"
                     })
+                else:
+                    summary_data.append({
+                        "股票名稱 (代號)": stock_label,
+                        "收盤價": "讀取失敗",
+                        "監控中的均線": "-",
+                        "符合警示的均線": "數據獲取異常"
+                    })
 
-        st.dataframe(pd.DataFrame(summary_data), use_container_width=True)
+        # 呈現表格
+        if summary_data:
+            st.dataframe(pd.DataFrame(summary_data), use_container_width=True)
 
-        st.write("### 🔔 觸發通知區")
-        if all_alerts:
-            st.warning("⚠️ 目前滿足觸發門檻的個股：\n" + "\n".join(all_alerts))
-            if st.button("📲 發送選擇均線之 LINE 警示訊息"):
-                msg = f"\n🚨【台股監測警示 - 均線通知】\n門檻設定：{alert_threshold}%\n" + "\n".join(all_alerts).replace("**", "")
-                success, info = send_line_message(line_token, line_user_id, msg)
+        st.markdown("---")
+        st.write("### 🔔 LINE 手動發送與觸發通知區")
+        
+        # 不論有無觸發警示，均保留「手動測試 / 發送 Line 按鈕」
+        col_btn1, col_btn2 = st.columns([1, 1])
+        
+        with col_btn1:
+            if st.button("🧪 發送 LINE 測試訊息"):
+                success, info = send_line_message(line_token, line_user_id, "🔔 這是一條來自【台股均線監測站】的連線測試訊息！")
                 if success:
                     st.success(info)
                 else:
                     st.error(info)
+
+        if all_alerts:
+            st.warning("⚠️ 目前滿足觸發門檻的個股：\n" + "\n".join(all_alerts))
+            with col_btn2:
+                if st.button("📲 發送選擇均線之 LINE 警示訊息", type="primary"):
+                    msg = f"\n🚨【台股監測警示 - 均線通知】\n門檻設定：{alert_threshold}%\n" + "\n".join(all_alerts).replace("**", "")
+                    success, info = send_line_message(line_token, line_user_id, msg)
+                    if success:
+                        st.success(info)
+                    else:
+                        st.error(info)
         else:
-            st.success(f"目前清單中的個股與其指定的監控均線差距均大於 {alert_threshold}%。")
+            st.info(f"💡 目前清單個股與其指定的監控均線差距均大於 {alert_threshold}%。")
 
 # ==========================================
 # Tab 2: 單一個股圖表細節
@@ -286,7 +339,8 @@ with tab2:
             ))
             colors = {'5MA': 'orange', '10MA': 'purple', '20MA': 'blue', '60MA': 'green', '120MA': 'brown', '240MA': 'red'}
             for ma_col, color in colors.items():
-                fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df[ma_col], mode='lines', name=MA_LABELS[ma_col], line=dict(color=color, width=1.5)))
+                if ma_col in plot_df.columns:
+                    fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df[ma_col], mode='lines', name=MA_LABELS[ma_col], line=dict(color=color, width=1.5)))
 
             fig.update_layout(xaxis_rangeslider_visible=False, height=550, margin=dict(l=20, r=20, t=20, b=20), template="plotly_white")
             st.plotly_chart(fig, use_container_width=True)
