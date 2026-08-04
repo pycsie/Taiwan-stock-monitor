@@ -11,7 +11,7 @@ st.title("📈 台股股價與客製化均線監測站 (LINE 推播)")
 
 # --- 1. Session State 初始化（資料記憶） ---
 if "watchlist" not in st.session_state:
-    st.session_state.watchlist = ["2330", "0050"]
+    st.session_state.watchlist = []
 
 # 每檔股票預設要監控的均線 (預設全部勾選)
 ALL_MAS = ['5MA', '10MA', '20MA', '60MA', '120MA', '240MA']
