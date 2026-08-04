@@ -6,48 +6,67 @@ import requests
 import json
 
 # 頁面配置
-st.set_page_config(page_title="台股均線監測與 LINE 警示站", layout="wide")
-st.title("📈 台股股價與多重均線監測站 (含 LINE 通知)")
+st.set_page_config(page_title="台股均線精準監測站", layout="wide")
+st.title("📈 台股股價與客製化均線監測站 (LINE 推播)")
 
-# 初始化 Session State (我的最愛清單)
+# --- 1. Session State 初始化（資料記憶） ---
 if "watchlist" not in st.session_state:
-    st.session_state.watchlist = ["2330", "0050", "2317"]
+    st.session_state.watchlist = ["2330", "0050"]
 
-# --- 側邊欄設定 ---
+# 每檔股票預設要監控的均線 (預設全部勾選)
+ALL_MAS = ['5MA', '10MA', '20MA', '60MA', '120MA', '240MA']
+if "ma_settings" not in st.session_state:
+    st.session_state.ma_settings = {
+        "2330": ['20MA', '60MA', '240MA'],
+        "0050": ['5MA', '10MA', '20MA', '60MA', '120MA', '240MA']
+    }
+
+# 優先讀取 Streamlit Secrets，否則從 Session State 讀取
+default_token = st.secrets.get("LINE_CHANNEL_ACCESS_TOKEN", "") if "LINE_CHANNEL_ACCESS_TOKEN" in st.secrets else st.session_state.get("line_token", "")
+default_user_id = st.secrets.get("LINE_USER_ID", "") if "LINE_USER_ID" in st.secrets else st.session_state.get("line_user_id", "")
+
+# --- 2. 側邊欄設定 ---
 st.sidebar.header("⚙️ 參數設定")
 
-# 1. 均線提醒門檻
 alert_threshold = st.sidebar.slider(
     "提醒觸發門檻（股價距離均線 %）", 
     min_value=0.5, max_value=5.0, value=2.0, step=0.1
 )
 
-# 2. LINE Messaging API 設定區
 st.sidebar.markdown("---")
-st.sidebar.header("💬 LINE Messaging API 設定")
-st.sidebar.caption("因 LINE Notify 已終止服務，本站改用 LINE 官方帳號 API 發送推播。")
-line_token = st.sidebar.text_input("Channel Access Token", type="password", help="請填入 LINE Developers 發行的 Channel Access Token")
-line_user_id = st.sidebar.text_input("Your User ID", type="password", help="請填入您的 LINE User ID (可在 LINE Developers 基本頁面找到)")
+st.sidebar.header("💬 LINE API 密鑰設定")
 
-# --- 函數定義 ---
+line_token = st.sidebar.text_input(
+    "Channel Access Token", 
+    value=default_token,
+    type="password", 
+    key="input_token"
+)
+line_user_id = st.sidebar.text_input(
+    "Your User ID", 
+    value=default_user_id,
+    type="password", 
+    key="input_user_id"
+)
+
+# 儲存輸入至 Session State
+st.session_state.line_token = line_token
+st.session_state.line_user_id = line_user_id
+
+# --- 3. 核心函數 ---
 def send_line_message(token, user_id, text):
     """ 使用 LINE Messaging API 發送 Push Message """
     if not token or not user_id:
-        return False, "請先在側邊欄填寫 LINE Channel Access Token 與 User ID！"
+        return False, "請填寫完整的 LINE Token 與 User ID！"
     
     url = "https://api.line.me/v2/bot/message/push"
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {token}"
+        "Authorization": f"Bearer {token.strip()}"
     }
     payload = {
-        "to": user_id,
-        "messages": [
-            {
-                "type": "text",
-                "text": text
-            }
-        ]
+        "to": user_id.strip(),
+        "messages": [{"type": "text", "text": text}]
     }
     try:
         res = requests.post(url, headers=headers, data=json.dumps(payload), timeout=10)
@@ -56,11 +75,11 @@ def send_line_message(token, user_id, text):
         else:
             return False, f"發送失敗 (代碼 {res.status_code}): {res.text}"
     except Exception as e:
-        return False, f"發送發生異常: {str(e)}"
+        return False, f"發送異常: {str(e)}"
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=300) # 5分鐘快取
 def load_stock_data(stock_id):
-    """ 抓取股票資料並計算均線 """
+    """ 抓取歷史資料並計算 6 大均線 """
     symbol = f"{stock_id}.TW" if not stock_id.endswith(".TW") and not stock_id.endswith(".TWO") else stock_id
     try:
         data = yf.download(symbol, period="2y", interval="1d")
@@ -74,7 +93,6 @@ def load_stock_data(stock_id):
         if data.empty:
             return None
             
-        # 計算均線
         data['5MA'] = data['Close'].rolling(5).mean()
         data['10MA'] = data['Close'].rolling(10).mean()
         data['20MA'] = data['Close'].rolling(20).mean()
@@ -85,91 +103,120 @@ def load_stock_data(stock_id):
     except Exception:
         return None
 
-# --- 主分頁介面 ---
-tab1, tab2 = st.tabs(["🔍 個股詳細分析", "⭐ 我的最愛與全清單監測"])
+MA_LABELS = {
+    '5MA': '5日線',
+    '10MA': '10日線',
+    '20MA': '月線(20MA)',
+    '60MA': '季線(60MA)',
+    '120MA': '半年線(120MA)',
+    '240MA': '年線(240MA)'
+}
+
+# --- 4. 主介面 Tabs ---
+tab1, tab2 = st.tabs(["⭐ 我的最愛與自訂均線通知", "🔍 單一個股圖表細節"])
 
 # ==========================================
-# Tab 1: 個股詳細分析
+# Tab 1: 我的最愛管理與獨立均線設定
 # ==========================================
 with tab1:
-    col_input, col_add = st.columns([3, 1])
-    with col_input:
-        stock_id = st.text_input("輸入台股代號（例: 2330, 2454）", value="2330").strip()
-    with col_add:
+    st.subheader("➕ 新增與管理關注個股")
+    
+    col_in, col_btn = st.columns([3, 1])
+    with col_in:
+        new_stock = st.text_input("輸入要加入我的最愛的股票代號（如：2317）", key="new_stock_input").strip()
+    with col_btn:
         st.write(" ")
         st.write(" ")
-        if st.button("➕ 加到我的最愛"):
-            if stock_id and stock_id not in st.session_state.watchlist:
-                st.session_state.watchlist.append(stock_id)
-                st.success(f"已將 {stock_id} 加入我的最愛！")
+        if st.button("加到關注清單"):
+            if new_stock and new_stock not in st.session_state.watchlist:
+                st.session_state.watchlist.append(new_stock)
+                st.session_state.ma_settings[new_stock] = ALL_MAS.copy()
+                st.rerun()
 
-    if stock_id:
-        df = load_stock_data(stock_id)
-        if df is None or df.empty:
-            st.error(f"無法取得 {stock_id} 資料，請檢查股票代號是否正確。")
-        else:
-            latest = df.iloc[-1]
-            latest_price = float(latest['Close'])
-            latest_date = df.index[-1].strftime('%Y-%m-%d')
+    st.markdown("---")
+    st.subheader("⚙️ 獨立設定每檔股票要監控的均線")
 
-            st.subheader(f"📊 {stock_id} 股票資訊（最後更新日期：{latest_date}）")
-            st.metric("當前收盤價", f"{latest_price:.2f} 元")
+    # 動態設定每檔股票監控的均線
+    for code in st.session_state.watchlist:
+        with st.expander(f"📌 **{code}** 監控均線設定", expanded=True):
+            col_del, col_select = st.columns([1, 4])
+            with col_del:
+                if st.button(f"🗑️ 移除 {code}", key=f"del_{code}"):
+                    st.session_state.watchlist.remove(code)
+                    if code in st.session_state.ma_settings:
+                        del st.session_state.ma_settings[code]
+                    st.rerun()
+            with col_select:
+                current_selected = st.session_state.ma_settings.get(code, ALL_MAS)
+                selected_mas = st.multiselect(
+                    f"選擇 {code} 要觸發通知的均線：",
+                    options=ALL_MAS,
+                    default=current_selected,
+                    format_func=lambda x: f"{x} ({MA_LABELS[x]})",
+                    key=f"ms_{code}"
+                )
+                st.session_state.ma_settings[code] = selected_mas
 
-            # 檢查均線警示
-            ma_keys = {
-                '5日線 (5MA)': latest['5MA'],
-                '10日線 (10MA)': latest['10MA'],
-                '月線 (20MA)': latest['20MA'],
-                '季線 (60MA)': latest['60MA'],
-                '半年線 (120MA)': latest['120MA'],
-                '年線 (240MA)': latest['240MA']
-            }
+    st.markdown("---")
+    st.subheader("📊 清單即時均線警示比對")
 
-            ma_summary = []
-            alerts = []
+    all_alerts = []
+    summary_data = []
 
-            for name, ma_val in ma_keys.items():
-                if pd.isna(ma_val):
-                    diff_pct = None
-                    status = "資料不足"
+    if st.session_state.watchlist:
+        with st.spinner("更新數據中 (預設 5 分鐘更新一次)..."):
+            for code in st.session_state.watchlist:
+                df_code = load_stock_data(code)
+                if df_code is not None and not df_code.empty:
+                    last_row = df_code.iloc[-1]
+                    price = float(last_row['Close'])
+                    target_mas = st.session_state.ma_settings.get(code, ALL_MAS)
+                    
+                    triggered_info = []
+                    
+                    for ma_key in target_mas:
+                        ma_val = last_row[ma_key]
+                        if pd.notna(ma_val):
+                            ma_val = float(ma_val)
+                            diff = ((price - ma_val) / ma_val) * 100
+                            if abs(diff) <= alert_threshold:
+                                pos = "站上" if diff >= 0 else "跌破"
+                                triggered_info.append(f"{MA_LABELS[ma_key]}({abs(diff):.1f}%)")
+                                all_alerts.append(
+                                    f"• **{code}** 現價 {price:.2f} 靠近 **{MA_LABELS[ma_key]}** ({ma_val:.2f})，差距 {abs(diff):.1f}% ({pos})"
+                                )
+
+                    summary_data.append({
+                        "股票": code,
+                        "收盤價": f"{price:.2f}",
+                        "監控中的均線": ", ".join([MA_LABELS[m] for m in target_mas]),
+                        "符合警示的均線": ", ".join(triggered_info) if triggered_info else "無接近"
+                    })
+
+        st.dataframe(pd.DataFrame(summary_data), use_container_width=True)
+
+        st.write("### 🔔 觸發通知區")
+        if all_alerts:
+            st.warning("⚠️ 目前滿足觸發門檻的個股：\n" + "\n".join(all_alerts))
+            if st.button("📲 發送選擇均線之 LINE 警示訊息"):
+                msg = f"\n🚨【台股監測警示 - 均線通知】\n門檻設定：{alert_threshold}%\n" + "\n".join(all_alerts).replace("**", "")
+                success, info = send_line_message(line_token, line_user_id, msg)
+                if success:
+                    st.success(info)
                 else:
-                    ma_val = float(ma_val)
-                    diff_pct = ((latest_price - ma_val) / ma_val) * 100
-                    if abs(diff_pct) <= alert_threshold:
-                        pos = "上方" if diff_pct >= 0 else "下方"
-                        alerts.append(f"⚠️ {stock_id} 接近 {name} ({ma_val:.2f}元)：現價 {latest_price:.2f} 元 (相差 {abs(diff_pct):.2f}%，位處均線{pos})")
-                    status = f"{'站上' if diff_pct >= 0 else '跌破'} ({diff_pct:+.2f}%)"
+                    st.error(info)
+        else:
+            st.success(f"目前清單中的個股與其指定的監控均線差距均大於 {alert_threshold}%。")
 
-                ma_summary.append({
-                    "均線名稱": name,
-                    "均線價格": f"{ma_val:.2f}" if pd.notna(ma_val) else "N/A",
-                    "距現價 (%)": f"{diff_pct:+.2f}%" if diff_pct is not None else "N/A",
-                    "狀態": status
-                })
-
-            # 警示提示區
-            st.write("### 🔔 均線接近警示通知")
-            if alerts:
-                for alert in alerts:
-                    st.warning(alert)
-                
-                # 手動發送 LINE 按鈕
-                if st.button(f"📲 發送 [{stock_id}] 警示訊息至 LINE"):
-                    msg = f"\n📈 【台股均線警示 - {stock_id}】\n收盤價：{latest_price:.2f}\n" + "\n".join(alerts)
-                    success, info = send_line_message(line_token, line_user_id, msg)
-                    if success:
-                        st.success(info)
-                    else:
-                        st.error(info)
-            else:
-                st.success(f"目前股價與所有均線相差均大於 {alert_threshold}%，無即時靠近警示。")
-
-            st.write("### 📋 各週期均線數據")
-            st.dataframe(pd.DataFrame(ma_summary), use_container_width=True)
-
-            # K線走勢圖
-            st.write("### 📉 股價與均線走勢圖 (近 120 個交易日)")
-            plot_df = df.tail(120)
+# ==========================================
+# Tab 2: 單一個股圖表細節
+# ==========================================
+with tab2:
+    search_code = st.text_input("輸入台股代號查看技術線圖", value="2330").strip()
+    if search_code:
+        df_single = load_stock_data(search_code)
+        if df_single is not None and not df_single.empty:
+            plot_df = df_single.tail(120)
             fig = go.Figure()
             fig.add_trace(go.Candlestick(
                 x=plot_df.index, open=plot_df['Open'], high=plot_df['High'],
@@ -177,76 +224,7 @@ with tab1:
             ))
             colors = {'5MA': 'orange', '10MA': 'purple', '20MA': 'blue', '60MA': 'green', '120MA': 'brown', '240MA': 'red'}
             for ma_col, color in colors.items():
-                fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df[ma_col], mode='lines', name=ma_col, line=dict(color=color, width=1.5)))
+                fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df[ma_col], mode='lines', name=MA_LABELS[ma_col], line=dict(color=color, width=1.5)))
 
-            fig.update_layout(xaxis_rangeslider_visible=False, height=500, margin=dict(l=20, r=20, t=20, b=20), template="plotly_white")
+            fig.update_layout(xaxis_rangeslider_visible=False, height=550, margin=dict(l=20, r=20, t=20, b=20), template="plotly_white")
             st.plotly_chart(fig, use_container_width=True)
-
-# ==========================================
-# Tab 2: 我的最愛清單總覽與批次監測
-# ==========================================
-with tab2:
-    st.subheader("⭐ 我的最愛清單")
-    
-    # 顯示目前關注股票與刪除按鈕
-    if st.session_state.watchlist:
-        cols = st.columns(len(st.session_state.watchlist))
-        for idx, item in enumerate(st.session_state.watchlist):
-            with cols[idx]:
-                st.write(f"**{item}**")
-                if st.button(f"🗑️ 移除", key=f"del_{item}"):
-                    st.session_state.watchlist.remove(item)
-                    st.rerun()
-    else:
-        st.info("目前我的最愛清單為空，請前往「個股詳細分析」分頁新增股票。")
-
-    st.markdown("---")
-    st.subheader("📊 關注清單均線狀態總覽")
-
-    all_alerts = []
-    summary_list = []
-
-    if st.session_state.watchlist:
-        with st.spinner("正在抓取清單中所有股票數據..."):
-            for code in st.session_state.watchlist:
-                df_code = load_stock_data(code)
-                if df_code is not None and not df_code.empty:
-                    last_row = df_code.iloc[-1]
-                    price = float(last_row['Close'])
-                    
-                    triggered_mas = []
-                    ma_map = {'5MA':'5日', '10MA':'10日', '20MA':'月線', '60MA':'季線', '120MA':'半年線', '240MA':'年線'}
-                    
-                    for ma_col, label in ma_map.items():
-                        ma_p = last_row[ma_col]
-                        if pd.notna(ma_p):
-                            ma_p = float(ma_p)
-                            diff = abs((price - ma_p) / ma_p) * 100
-                            if diff <= alert_threshold:
-                                triggered_mas.append(f"{label}(相差{diff:.1f}%)")
-                                all_alerts.append(f"• {code} 現價 {price:.2f} 接近 {label} ({ma_p:.2f})，差距 {diff:.1f}%")
-
-                    summary_list.append({
-                        "股票代號": code,
-                        "當前收盤價": f"{price:.2f}",
-                        "靠近的均線": ", ".join(triggered_mas) if triggered_mas else "無接近均線",
-                        "5MA": f"{last_row['5MA']:.2f}" if pd.notna(last_row['5MA']) else "-",
-                        "20MA": f"{last_row['20MA']:.2f}" if pd.notna(last_row['20MA']) else "-",
-                        "60MA": f"{last_row['60MA']:.2f}" if pd.notna(last_row['60MA']) else "-"
-                    })
-
-        st.dataframe(pd.DataFrame(summary_list), use_container_width=True)
-
-        # 一鍵批次推播按鈕
-        st.write("### 🔔 關注清單 LINE 批次通知")
-        if all_alerts:
-            st.warning("目前清單中有以下股票觸發均線接近條件：\n" + "\n".join(all_alerts))
-            if st.button("📲 立即發送全清單警示至 LINE"):
-                full_msg = f"\n🚨【台股全清單均線警示通知】\n提醒門檻：{alert_threshold}%\n" + "\n".join(all_alerts)
-                success, info = send_line_message(line_token, line_user_id, full_msg)
-                if success:
-                    st.success(info)
-                else:
-                    st.error(info)
-        else:
-            st.success(f"目前關注清單中的股票均未觸發 {alert_threshold}% 均線接近警示。")
