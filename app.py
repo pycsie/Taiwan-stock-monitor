@@ -103,7 +103,7 @@ if stock_id:
 
         # 顯示均線明細表格
         st.write("### 📋 各週期均線數據")
-        st.dataframe(pd.DataFrame(ma_summary), use_container_state_dict=True)
+        st.dataframe(pd.DataFrame(ma_summary), use_container_width=True)
 
         # 4. K線圖與均線視覺化
         st.write("### 📉 股價與均線走勢圖 (近 120 個交易日)")
@@ -133,4 +133,4 @@ if stock_id:
             margin=dict(l=20, r=20, t=20, b=20),
             template="plotly_white"
         )
-        st.plotly_chart(fig, use_container_style_dict=True)
+        st.plotly_chart(fig, use_container_width=True)
