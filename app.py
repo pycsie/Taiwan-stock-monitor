@@ -29,6 +29,7 @@ def get_gsheet_connection():
     return st.connection("gsheets", type=GSheetsConnection)
 
 def load_settings_from_gsheets():
+    """ 從 Google Sheets 撈取最新資料 """
     try:
         conn = get_gsheet_connection()
         df = conn.read(worksheet="Watchlist", ttl=0)
@@ -37,7 +38,6 @@ def load_settings_from_gsheets():
             return ["2330", "0050"], {"2330": ['20MA', '60MA', '240MA'], "0050": ALL_MAS.copy()}
             
         df = df.dropna(how='all')
-        
         watchlist = []
         ma_settings = {}
         
@@ -58,10 +58,14 @@ def load_settings_from_gsheets():
             
         return watchlist, ma_settings
     except Exception as e:
-        st.error(f"⚠️ Google Sheets 連線或讀取失敗，請確認 Secrets 設定！錯誤細節: {e}")
+        st.error(f"⚠️ Google Sheets 連線或讀取失敗，使用暫存資料。錯誤細節: {e}")
+        # 如果已存在狀態則回傳現有狀態，避免直接被覆蓋為預設值
+        if "watchlist" in st.session_state and "ma_settings" in st.session_state:
+            return st.session_state.watchlist, st.session_state.ma_settings
         return ["2330", "0050"], {"2330": ['20MA', '60MA', '240MA'], "0050": ALL_MAS.copy()}
 
 def save_settings_to_gsheets(watchlist, ma_settings):
+    """ 將最新的股票與均線設定寫回 Google Sheets """
     try:
         conn = get_gsheet_connection()
         rows = []
@@ -77,10 +81,11 @@ def save_settings_to_gsheets(watchlist, ma_settings):
         st.error(f"❌ 寫入 Google Sheets 失敗: {e}")
         return False
 
-# --- 2. 載入最新設定 ---
-db_watchlist, db_ma_settings = load_settings_from_gsheets()
-st.session_state.watchlist = db_watchlist
-st.session_state.ma_settings = db_ma_settings
+# --- 2. 🔥 狀態初始化保護機制 (防止重新整理時覆蓋) ---
+if "watchlist" not in st.session_state or "ma_settings" not in st.session_state:
+    db_watchlist, db_ma_settings = load_settings_from_gsheets()
+    st.session_state.watchlist = db_watchlist
+    st.session_state.ma_settings = db_ma_settings
 
 default_token = st.secrets.get("LINE_CHANNEL_ACCESS_TOKEN", "") if "LINE_CHANNEL_ACCESS_TOKEN" in st.secrets else st.session_state.get("line_token", "")
 default_user_id = st.secrets.get("LINE_USER_ID", "") if "LINE_USER_ID" in st.secrets else st.session_state.get("line_user_id", "")
@@ -103,8 +108,12 @@ st.session_state.line_token = line_token
 st.session_state.line_user_id = line_user_id
 
 st.sidebar.markdown("---")
-if st.sidebar.button("🔄 手動同步 Google Sheets"):
+if st.sidebar.button("🔄 從 Google Sheets 強制重新載入"):
+    db_watchlist, db_ma_settings = load_settings_from_gsheets()
+    st.session_state.watchlist = db_watchlist
+    st.session_state.ma_settings = db_ma_settings
     st.cache_data.clear()
+    st.success("已成功重新載入雲端設定！")
     st.rerun()
 
 # --- 4. 工具函數 ---
@@ -147,43 +156,31 @@ def send_line_message(token, user_id, text):
     except Exception as e:
         return False, f"發送異常: {str(e)}"
 
-# 🔥 核心修復：解決 NaN 與 MultiIndex 問題
 @st.cache_data(ttl=300)
 def load_stock_data(stock_id):
     clean_id = str(stock_id).replace(".TW", "").replace(".TWO", "").strip()
-    
-    # 依序嘗試上市 (.TW) 與 上櫃 (.TWO)
     for suffix in [".TW", ".TWO"]:
         symbol = f"{clean_id}{suffix}"
         try:
             data = yf.download(symbol, period="2y", interval="1d", progress=False)
-            
             if data is None or data.empty:
                 continue
-                
-            # 1. 處理 yfinance 的雙層欄位格式
             if isinstance(data.columns, pd.MultiIndex):
                 data.columns = data.columns.get_level_values(0)
-                
-            # 2. 過濾未開盤或包含 NaN 的歷史資料列，確保 Close 是有效價格
             if 'Close' in data.columns:
                 data = data.dropna(subset=['Close'])
-                
             if data.empty or len(data) < 5:
                 continue
                 
-            # 3. 計算 6 大均線
             data['5MA'] = data['Close'].rolling(5).mean()
             data['10MA'] = data['Close'].rolling(10).mean()
             data['20MA'] = data['Close'].rolling(20).mean()
             data['60MA'] = data['Close'].rolling(60).mean()
             data['120MA'] = data['Close'].rolling(120).mean()
             data['240MA'] = data['Close'].rolling(240).mean()
-            
             return data
         except Exception:
             continue
-            
     return None
 
 # --- 5. 主介面 Tabs ---
@@ -207,14 +204,20 @@ with tab1:
                 if clean_new not in st.session_state.watchlist:
                     st.session_state.watchlist.append(clean_new)
                     st.session_state.ma_settings[clean_new] = ALL_MAS.copy()
+                    # 立即同步至雲端
                     save_settings_to_gsheets(st.session_state.watchlist, st.session_state.ma_settings)
-                    st.success(f"已新增 {clean_new} 並成功寫入 Google Sheets！")
+                    st.success(f"已新增 {clean_new} 並儲存！")
                     st.rerun()
 
     st.markdown("---")
     st.subheader("⚙️ 獨立設定每檔股票要監控的均線")
 
-    has_changed = False
+    # 監聽多選框改變事件的回呼函數
+    def update_ma_setting(code):
+        selected = st.session_state[f"ms_{code}"]
+        st.session_state.ma_settings[code] = selected
+        save_settings_to_gsheets(st.session_state.watchlist, st.session_state.ma_settings)
+
     for code in list(st.session_state.watchlist):
         stock_label = get_stock_label(code)
         with st.expander(f"📌 **{stock_label}** 監控均線設定", expanded=True):
@@ -228,19 +231,15 @@ with tab1:
                     st.rerun()
             with col_select:
                 current_selected = st.session_state.ma_settings.get(code, ALL_MAS)
-                selected_mas = st.multiselect(
+                st.multiselect(
                     f"選擇 {stock_label} 要觸發通知的均線：",
                     options=ALL_MAS,
                     default=current_selected,
                     format_func=lambda x: f"{x} ({MA_LABELS[x]})",
-                    key=f"ms_{code}"
+                    key=f"ms_{code}",
+                    on_change=update_ma_setting,
+                    args=(code,)
                 )
-                if selected_mas != current_selected:
-                    st.session_state.ma_settings[code] = selected_mas
-                    has_changed = True
-
-    if has_changed:
-        save_settings_to_gsheets(st.session_state.watchlist, st.session_state.ma_settings)
 
     st.markdown("---")
     st.subheader("📊 清單即時均線警示比對")
@@ -258,7 +257,6 @@ with tab1:
                     last_row = df_code.iloc[-1]
                     raw_price = last_row['Close']
                     
-                    # 再次確認收盤價非 NaN 且可轉為 float
                     if pd.notna(raw_price):
                         price = float(raw_price)
                         target_mas = st.session_state.ma_settings.get(code, ALL_MAS)
