@@ -17,7 +17,6 @@ MA_LABELS = {
     '60MA': '季線(60MA)', '120MA': '半年線(120MA)', '240MA': '年線(240MA)'
 }
 
-# 常用股票內建備援字典 (防止 twstock 連線失敗時股票名稱消失)
 BUILTIN_STOCKS = {
     "2330": "台積電", "2317": "鴻海", "2454": "聯發科", "2308": "台達電",
     "2382": "廣達", "2881": "富邦金", "2882": "國泰金", "2412": "中華電",
@@ -25,34 +24,38 @@ BUILTIN_STOCKS = {
     "00878": "國泰永續高股息", "00919": "群益台灣精選高息", "00929": "復華台灣科技優息"
 }
 
-# --- 1. Google Sheets 資料庫連線與讀寫函數 ---
-@st.cache_resource
+# --- 1. Google Sheets 資料庫連線與讀寫函數 (不使用 Cache 以確保即時性) ---
 def get_gsheet_connection():
     """ 建立 Google Sheets 連線 """
     return st.connection("gsheets", type=GSheetsConnection)
 
 def load_settings_from_gsheets():
-    """ 從 Google Sheets 載入股票與均線設定 """
+    """ 直接從 Google Sheets 撈取最新資料 """
     try:
         conn = get_gsheet_connection()
-        # ttl=0 確保每次載入最新試算表內容
+        # 強制讀取 Watchlist 工作表
         df = conn.read(worksheet="Watchlist", ttl=0)
         
         if df is None or df.empty:
             return ["2330", "0050"], {"2330": ['20MA', '60MA', '240MA'], "0050": ALL_MAS.copy()}
             
-        df = df.dropna(how='all') # 移除全空白行
+        df = df.dropna(how='all') # 移除空白行
         
         watchlist = []
         ma_settings = {}
         
         for _, row in df.iterrows():
-            if 'Stock' in row and pd.notna(row['Stock']):
-                code = str(row['Stock']).replace(".TW", "").replace(".TWO", "").strip()
-                # 過濾純數字或合法代號
+            # 處理 Stock 欄位
+            stock_val = row.get('Stock', '')
+            if pd.notna(stock_val):
+                # 轉成字串並去除 .TW/.TWO
+                code = str(stock_val).split('.')[0].strip()
                 if code and code.isalnum():
                     watchlist.append(code)
-                    mas_str = str(row['MAs']) if ('MAs' in row and pd.notna(row['MAs'])) else ""
+                    
+                    # 處理 MAs 欄位
+                    mas_val = row.get('MAs', '')
+                    mas_str = str(mas_val) if pd.notna(mas_val) else ""
                     mas_list = [m.strip() for m in mas_str.split(",") if m.strip() in ALL_MAS]
                     ma_settings[code] = mas_list if mas_list else ALL_MAS.copy()
                     
@@ -62,7 +65,7 @@ def load_settings_from_gsheets():
             
         return watchlist, ma_settings
     except Exception as e:
-        st.warning(f"💡 雲端試算表讀取提示: 使用預設清單中 ({str(e)})")
+        st.error(f"⚠️ Google Sheets 連線或讀取失敗，請確認 Secrets 設定！錯誤細節: {e}")
         return ["2330", "0050"], {"2330": ['20MA', '60MA', '240MA'], "0050": ALL_MAS.copy()}
 
 def save_settings_to_gsheets(watchlist, ma_settings):
@@ -79,14 +82,13 @@ def save_settings_to_gsheets(watchlist, ma_settings):
         conn.update(worksheet="Watchlist", data=new_df)
         return True
     except Exception as e:
-        st.error(f"❌ 同步至 Google Sheets 失敗: {e}")
+        st.error(f"❌ 寫入 Google Sheets 失敗: {e}")
         return False
 
-# --- 2. 初始化 Session State (與 DB 同步) ---
-if "watchlist" not in st.session_state or "ma_settings" not in st.session_state:
-    db_watchlist, db_ma_settings = load_settings_from_gsheets()
-    st.session_state.watchlist = db_watchlist
-    st.session_state.ma_settings = db_ma_settings
+# --- 2. 每次重新整理都從 Google Sheets 重新載入，避免記憶體死鎖 ---
+db_watchlist, db_ma_settings = load_settings_from_gsheets()
+st.session_state.watchlist = db_watchlist
+st.session_state.ma_settings = db_ma_settings
 
 # 讀取 Secrets LINE 設定
 default_token = st.secrets.get("LINE_CHANNEL_ACCESS_TOKEN", "") if "LINE_CHANNEL_ACCESS_TOKEN" in st.secrets else st.session_state.get("line_token", "")
@@ -110,43 +112,29 @@ st.session_state.line_token = line_token
 st.session_state.line_user_id = line_user_id
 
 st.sidebar.markdown("---")
-if st.sidebar.button("🔄 強制從 Google Sheets 重新載入"):
+if st.sidebar.button("🔄 手動同步 Google Sheets"):
     st.cache_data.clear()
-    st.cache_resource.clear()
-    db_watchlist, db_ma_settings = load_settings_from_gsheets()
-    st.session_state.watchlist = db_watchlist
-    st.session_state.ma_settings = db_ma_settings
     st.rerun()
 
 # --- 4. 工具函數 ---
 @st.cache_data(ttl=86400)
 def get_stock_name(code):
-    """ 強健的股票名稱查詢機制 (三重防護) """
     clean_code = str(code).replace(".TW", "").replace(".TWO", "").strip()
-    
-    # 防護 1: 查詢內建常規字典
     if clean_code in BUILTIN_STOCKS:
         return BUILTIN_STOCKS[clean_code]
-        
-    # 防護 2: 查詢 twstock
     try:
         if clean_code in twstock.codes:
             name = twstock.codes[clean_code].name
-            if name:
-                return name
+            if name: return name
     except Exception:
         pass
-        
-    # 防護 3: 查詢 yfinance
     try:
         symbol = f"{clean_code}.TW"
         info = yf.Ticker(symbol).info
         name = info.get("shortName") or info.get("longName")
-        if name:
-            return name
+        if name: return name
     except Exception:
         pass
-        
     return clean_code
 
 def get_stock_label(code):
@@ -211,8 +199,9 @@ with tab1:
                 if clean_new not in st.session_state.watchlist:
                     st.session_state.watchlist.append(clean_new)
                     st.session_state.ma_settings[clean_new] = ALL_MAS.copy()
+                    # 即時寫入 Google Sheets
                     save_settings_to_gsheets(st.session_state.watchlist, st.session_state.ma_settings)
-                    st.success(f"已新增 {clean_new} 並同步存至 Google Sheets！")
+                    st.success(f"已新增 {clean_new} 並成功寫入 Google Sheets！")
                     st.rerun()
 
     st.markdown("---")
@@ -289,14 +278,12 @@ with tab1:
                         "符合警示的均線": "數據獲取異常"
                     })
 
-        # 呈現表格
         if summary_data:
             st.dataframe(pd.DataFrame(summary_data), use_container_width=True)
 
         st.markdown("---")
         st.write("### 🔔 LINE 手動發送與觸發通知區")
         
-        # 不論有無觸發警示，均保留「手動測試 / 發送 Line 按鈕」
         col_btn1, col_btn2 = st.columns([1, 1])
         
         with col_btn1:
