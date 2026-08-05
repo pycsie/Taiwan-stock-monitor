@@ -3,6 +3,7 @@ import json
 import requests
 import pandas as pd
 import yfinance as yf
+import twstock
 from google.oauth2.service_account import Credentials
 import gspread
 
@@ -20,15 +21,47 @@ MA_LABELS = {
     '60MA': '季線(60MA)', '120MA': '半年線(120MA)', '240MA': '年線(240MA)'
 }
 
-# --- 2. 讀取 Google Sheets ---
+BUILTIN_STOCKS = {
+    "2330": "台積電", "2317": "鴻海", "2454": "聯發科", "2308": "台達電",
+    "2382": "廣達", "2881": "富邦金", "2882": "國泰金", "2412": "中華電",
+    "2891": "中信金", "3711": "日月光投控", "0050": "元大台灣50", "0056": "元大高股息",
+    "00878": "國泰永續高股息", "00919": "群益台灣精選高息", "00929": "復華台灣科技優息"
+}
+
+# --- 2. 股票名稱查詢工具 ---
+def get_stock_name(code):
+    clean_code = str(code).replace(".TW", "").replace(".TWO", "").strip()
+    if clean_code in BUILTIN_STOCKS:
+        return BUILTIN_STOCKS[clean_code]
+    try:
+        if clean_code in twstock.codes:
+            name = twstock.codes[clean_code].name
+            if name: return name
+    except Exception:
+        pass
+    try:
+        symbol = f"{clean_code}.TW"
+        info = yf.Ticker(symbol).info
+        name = info.get("shortName") or info.get("longName")
+        if name: return name
+    except Exception:
+        pass
+    return clean_code
+
+def get_stock_label(code):
+    clean_code = str(code).replace(".TW", "").replace(".TWO", "").strip()
+    name = get_stock_name(clean_code)
+    if name and name != clean_code:
+        return f"{name} ({clean_code})"
+    return clean_code
+
+# --- 3. 讀取 Google Sheets ---
 def get_watchlist_from_gsheets():
     try:
-        # 驗證 Secrets 是否空值
         if not GCP_SA_JSON or not SPREADSHEET_KEY:
             print("❌ 錯誤：缺少 GCP_SERVICE_ACCOUNT 或 SPREADSHEET_KEY 環境變數！")
             return [], {}
 
-        # 解析 JSON 憑證
         creds_dict = json.loads(GCP_SA_JSON)
         scopes = [
             'https://www.googleapis.com/auth/spreadsheets',
@@ -37,7 +70,6 @@ def get_watchlist_from_gsheets():
         credentials = Credentials.from_service_account_info(creds_dict, scopes=scopes)
         gc = gspread.authorize(credentials)
         
-        # 開啟 Sheet
         sh = gc.open_by_key(SPREADSHEET_KEY)
         worksheet = sh.worksheet("Watchlist")
         records = worksheet.get_all_records()
@@ -53,13 +85,13 @@ def get_watchlist_from_gsheets():
                 ma_settings[stock] = mas_list if mas_list else ALL_MAS.copy()
         return watchlist, ma_settings
     except json.JSONDecodeError as e:
-        print(f"❌ 錯誤：GCP_SERVICE_ACCOUNT 不是有效的 JSON 格式！內容有漏或格式損壞: {e}")
+        print(f"❌ 錯誤：GCP_SERVICE_ACCOUNT 不是有效的 JSON 格式！: {e}")
         return [], {}
     except Exception as e:
         print(f"❌ 讀取 Google Sheets 失敗: {e}")
         return [], {}
 
-# --- 3. 抓取股票資料 ---
+# --- 4. 抓取股票資料 ---
 def load_stock_data(stock_id):
     clean_id = str(stock_id).replace(".TW", "").replace(".TWO", "").strip()
     for suffix in [".TW", ".TWO"]:
@@ -86,7 +118,7 @@ def load_stock_data(stock_id):
             continue
     return None
 
-# --- 4. 發送 LINE 訊息 ---
+# --- 5. 發送 LINE 訊息 ---
 def send_line_message(token, user_id, text):
     if not token or not user_id:
         print("❌ 錯誤：缺少 LINE_CHANNEL_ACCESS_TOKEN 或 LINE_USER_ID！")
@@ -101,7 +133,7 @@ def send_line_message(token, user_id, text):
         print(f"❌ LINE 訊息發送異常: {e}")
         return False
 
-# --- 5. 主程式 ---
+# --- 6. 主程式 ---
 def main():
     watchlist, ma_settings = get_watchlist_from_gsheets()
     if not watchlist:
@@ -109,7 +141,7 @@ def main():
         return
 
     all_alerts = []
-    print(f"正在比對 {len(watchlist)} 檔股票數據...")
+    print(f"正在比對 {len(watchlist)} 档股票數據...")
 
     for code in watchlist:
         df = load_stock_data(code)
@@ -117,6 +149,7 @@ def main():
             last_row = df.iloc[-1]
             price = float(last_row['Close'])
             target_mas = ma_settings.get(code, ALL_MAS)
+            stock_label = get_stock_label(code)  # 取得股票名稱 (代號)
 
             for ma_key in target_mas:
                 if ma_key in last_row and pd.notna(last_row[ma_key]):
@@ -125,7 +158,7 @@ def main():
                     if abs(diff) <= ALERT_THRESHOLD:
                         pos = "站上" if diff >= 0 else "跌破"
                         all_alerts.append(
-                            f"• {code} 現價 {price:.2f} 靠近 {MA_LABELS[ma_key]} ({ma_val:.2f})，差距 {abs(diff):.1f}% ({pos})"
+                            f"• {stock_label} 現價 {price:.2f} 靠近 {MA_LABELS[ma_key]} ({ma_val:.2f})，差距 {abs(diff):.1f}% ({pos})"
                         )
 
     if all_alerts:
