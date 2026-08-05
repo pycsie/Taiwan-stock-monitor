@@ -155,7 +155,7 @@ def send_line_message(token, user_id, text):
     except Exception as e:
         return False, f"發送異常: {str(e)}"
 
-# --- 擴充：計算 KD 指標與 5 日均量 ---
+# --- 擴充：計算指標與 5日均量 ---
 def calculate_indicators(df):
     for ma in [5, 10, 20, 60, 120, 240]:
         df[f'{ma}MA'] = df['Close'].rolling(ma).mean()
@@ -193,7 +193,7 @@ def load_stock_data(stock_id):
                 data.columns = data.columns.get_level_values(0)
             if 'Close' in data.columns:
                 data = data.dropna(subset=['Close'])
-            if data.empty or len(data) < 20:
+            if data.empty or len(data) < 25:
                 continue
                 
             return calculate_indicators(data)
@@ -202,7 +202,7 @@ def load_stock_data(stock_id):
     return None
 
 # --- 5. 主介面 Tabs ---
-tab1, tab2, tab3 = st.tabs(["⭐ 我的最愛與自訂均線 (DB連動)", "🔍 單一個股圖表細節", "🚀 全台股短線轉強掃描"])
+tab1, tab2, tab3 = st.tabs(["⭐ 我的最愛與自訂均線 (DB連動)", "🔍 單一個股圖表細節", "🚀 全台股帶量紅K短線轉強掃描"])
 
 # ==========================================
 # Tab 1: 我的最愛管理與對比警示 (完全保持原樣)
@@ -365,11 +365,11 @@ with tab2:
             st.plotly_chart(fig, use_container_width=True)
 
 # ==========================================
-# Tab 3: 🚀 全台股短線轉強掃描 (新增功能)
+# Tab 3: 🚀 全台股帶量紅K短線轉強掃描 (修訂邏輯)
 # ==========================================
 with tab3:
-    st.subheader("🚀 全台股短線轉強 / 均線扣低上彎 掃描器")
-    st.caption("自動動態篩選『成交量 > 2000 張』且『5日/10日/月線扣低轉上彎 / KD低檔金叉』之短線轉強標的")
+    st.subheader("🚀 全台股帶量紅 K 與均線上彎掃描器")
+    st.caption("嚴格篩選條件：【成交量 > 2000張】＋【收盤 > 開盤 (紅K)】＋【成交量 > 5日均量1.3倍 (帶量)】＋【5MA / 10MA / 月線(20MA) 剛扣低轉上彎至少一條】")
 
     col_v, col_s = st.columns(2)
     with col_v:
@@ -377,7 +377,7 @@ with tab3:
     with col_s:
         scan_scope = st.selectbox("掃描標的範圍", ["熱門大型與權值股 (約 30 檔 - 快速)", "全台股上市上櫃 (約 1800 檔 - 需較長時間)"])
 
-    if st.button("🔍 開始掃描轉強標的", type="primary"):
+    if st.button("🔍 開始掃描強勢標的", type="primary"):
         target_codes = []
         if scan_scope.startswith("熱門大型"):
             target_codes = list(BUILTIN_STOCKS.keys()) + [
@@ -403,44 +403,48 @@ with tab3:
                 prev = df.iloc[-2]
                 prev2 = df.iloc[-3]
 
+                open_price = float(curr['Open'])
+                close_price = float(curr['Close'])
                 vol_shares = float(curr['Volume'])
-                vol_lots = vol_shares / 1000.0  # 轉為張數
+                vol_lots = vol_shares / 1000.0
+                vol_5ma = float(curr['Vol_5MA']) if pd.notna(curr['Vol_5MA']) else 0
 
-                if vol_lots >= min_vol_lots:
-                    signals = []
-                    price = float(curr['Close'])
-                    vol_5ma = float(curr['Vol_5MA']) if pd.notna(curr['Vol_5MA']) else 0
+                # 條件 1：成交量門檻
+                cond_vol = vol_lots >= min_vol_lots
 
-                    # 1. 均線上彎 (前天>=昨天, 今天>昨天, 現價在均線上)
-                    for ma_key, ma_name in [('5MA', '5日線'), ('10MA', '10日線'), ('20MA', '月線')]:
-                        if pd.notna(curr[ma_key]) and pd.notna(prev[ma_key]) and pd.notna(prev2[ma_key]):
-                            c_ma, p_ma, p2_ma = float(curr[ma_key]), float(prev[ma_key]), float(prev2[ma_key])
-                            if p_ma <= p2_ma and c_ma > p_ma and price >= c_ma:
-                                signals.append(f"📈 {ma_name}轉上彎")
+                # 條件 2：帶量紅 K (當日收盤 > 開盤 且 當日量 > 5日均量 1.3 倍)
+                is_red_k = close_price > open_price
+                is_heavy_vol = (vol_5ma > 0) and (vol_shares >= vol_5ma * 1.3)
+                cond_red_heavy = is_red_k and is_heavy_vol
 
-                    # 2. KD 低檔/中軸金叉 (K <= 65)
-                    if pd.notna(curr['K']) and pd.notna(curr['D']) and pd.notna(prev['K']) and pd.notna(prev['D']):
-                        c_k, c_d, p_k, p_d = float(curr['K']), float(curr['D']), float(prev['K']), float(prev['D'])
-                        if p_k <= p_d and c_k > c_d and c_k <= 65:
-                            signals.append(f"🔥 KD金叉(K:{c_k:.1f})")
+                # 條件 3：均線上彎 (5MA / 10MA / 20MA 至少有一條扣低轉上彎)
+                up_mas = []
+                for ma_key, ma_name in [('5MA', '5日線'), ('10MA', '10日線'), ('20MA', '月線(20MA)')]:
+                    if pd.notna(curr[ma_key]) and pd.notna(prev[ma_key]) and pd.notna(prev2[ma_key]):
+                        c_ma, p_ma, p2_ma = float(curr[ma_key]), float(prev[ma_key]), float(prev2[ma_key])
+                        # 昨天<=前天，今天>昨天，且價格在均線上
+                        if p_ma <= p2_ma and c_ma > p_ma and close_price >= c_ma:
+                            up_mas.append(ma_name)
 
-                    # 3. 帶量攻擊 (量 > 5日均量 1.4 倍)
-                    if vol_5ma > 0 and vol_shares >= (vol_5ma * 1.4):
-                        signals.append(f"⚡ 帶量攻擊({(vol_shares/vol_5ma):.1f}倍量)")
+                cond_ma_up = len(up_mas) > 0
 
-                    if signals:
-                        scan_results.append({
-                            "股票代號/名稱": get_stock_label(code),
-                            "收盤價": f"{price:.2f}",
-                            "成交量 (張)": int(vol_lots),
-                            "KD (K值)": round(float(curr['K']), 1),
-                            "轉強訊號發動類型": " | ".join(signals)
-                        })
+                # 必須【同時滿足】三大硬性條件
+                if cond_vol and cond_red_heavy and cond_ma_up:
+                    vol_multiple = (vol_shares / vol_5ma) if vol_5ma > 0 else 0
+                    scan_results.append({
+                        "股票代號/名稱": get_stock_label(code),
+                        "收盤價": f"{close_price:.2f}",
+                        "漲跌K線": f"🔴 紅K (+{(close_price - open_price):.2f})",
+                        "成交量 (張)": int(vol_lots),
+                        "量增倍數": f"{vol_multiple:.1f} 倍",
+                        "轉上彎均線": "、".join(up_mas),
+                        "KD (K值)": round(float(curr['K']), 1) if pd.notna(curr['K']) else "-"
+                    })
 
         p_bar.empty()
 
         if scan_results:
-            st.success(f"🎉 掃描完成！符合『成交量 > {min_vol_lots}張』且出現轉強訊號的標的共 {len(scan_results)} 檔：")
+            st.success(f"🎉 掃描完成！符合【成交量 > {min_vol_lots}張】＋【帶量紅K】＋【短/月均線上彎】的股票共有 {len(scan_results)} 檔：")
             st.dataframe(pd.DataFrame(scan_results), use_container_width=True)
         else:
-            st.warning("⚠️ 目前沒有掃描到符合條件的股票，可嘗試調低成交量門檻再次試試。")
+            st.warning("⚠️ 目前無符合所有硬性條件（帶量紅K + 5/10/月均向上）的股票，可以嘗試降低成交量門檻再試一次。")
