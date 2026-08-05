@@ -155,7 +155,6 @@ def send_line_message(token, user_id, text):
     except Exception as e:
         return False, f"發送異常: {str(e)}"
 
-# --- 擴充：計算技術指標與 5日均量 ---
 def calculate_indicators(df):
     for ma in [5, 10, 20, 60, 120, 240]:
         df[f'{ma}MA'] = df['Close'].rolling(ma).mean()
@@ -209,7 +208,7 @@ tab1, tab2, tab3, tab4 = st.tabs([
 ])
 
 # ==========================================
-# Tab 1: 我的最愛管理與對比警示 (完全保持原樣)
+# Tab 1: 我的最愛管理與對比警示 (已更新短均>長均條件)
 # ==========================================
 with tab1:
     st.subheader("➕ 新增與管理關注個股 (自動同步至 Google Sheets)")
@@ -263,6 +262,7 @@ with tab1:
 
     st.markdown("---")
     st.subheader("📊 清單即時均線警示比對")
+    st.caption("🛡️ 警示前提條件：【短線均線 (5MA/10MA/20MA) 必須全數站上 120MA & 240MA】才會觸發接近警示。")
 
     all_alerts = []
     summary_data = []
@@ -273,43 +273,61 @@ with tab1:
                 df_code = load_stock_data(code)
                 stock_label = get_stock_label(code)
                 
-                if df_code is not None and not df_code.empty:
+                if df_code is not None and not df_code.empty and len(df_code) >= 240:
                     last_row = df_code.iloc[-1]
                     raw_price = last_row['Close']
                     
                     if pd.notna(raw_price):
                         price = float(raw_price)
                         target_mas = st.session_state.ma_settings.get(code, ALL_MAS)
+                        
+                        # 檢查短均線是否全部大於長均線 (120MA & 240MA)
+                        ma5, ma10, ma20 = float(last_row['5MA']), float(last_row['10MA']), float(last_row['20MA'])
+                        ma120, ma240 = float(last_row['120MA']), float(last_row['240MA'])
+                        
+                        has_valid_ma = pd.notna(ma5) and pd.notna(ma10) and pd.notna(ma20) and pd.notna(ma120) and pd.notna(ma240)
+                        short_mas_above = has_valid_ma and (
+                            (ma5 > ma120 and ma5 > ma240) and
+                            (ma10 > ma120 and ma10 > ma240) and
+                            (ma20 > ma120 and ma20 > ma240)
+                        )
+
                         triggered_info = []
                         
-                        for ma_key in target_mas:
-                            if ma_key in last_row and pd.notna(last_row[ma_key]):
-                                ma_val = float(last_row[ma_key])
-                                diff = ((price - ma_val) / ma_val) * 100
-                                if abs(diff) <= alert_threshold:
-                                    pos = "站上" if diff >= 0 else "跌破"
-                                    triggered_info.append(f"{MA_LABELS[ma_key]}({abs(diff):.1f}%)")
-                                    all_alerts.append(
-                                        f"• **{stock_label}** 現價 {price:.2f} 靠近 **{MA_LABELS[ma_key]}** ({ma_val:.2f})，差距 {abs(diff):.1f}% ({pos})"
-                                    )
+                        if short_mas_above:
+                            for ma_key in target_mas:
+                                if ma_key in last_row and pd.notna(last_row[ma_key]):
+                                    ma_val = float(last_row[ma_key])
+                                    diff = ((price - ma_val) / ma_val) * 100
+                                    if abs(diff) <= alert_threshold:
+                                        pos = "站上" if diff >= 0 else "跌破"
+                                        triggered_info.append(f"{MA_LABELS[ma_key]}({abs(diff):.1f}%)")
+                                        all_alerts.append(
+                                            f"• **{stock_label}** 現價 {price:.2f} 靠近 **{MA_LABELS[ma_key]}** ({ma_val:.2f})，差距 {abs(diff):.1f}% ({pos})"
+                                        )
 
+                        # 更新表格狀態欄位
+                        status_str = "符合短均>長均" if short_mas_above else "未符合(短均仍在長均下)"
                         summary_data.append({
                             "股票名稱 (代號)": stock_label,
                             "收盤價": f"{price:.2f}",
+                            "型態結構": status_str,
                             "監控中的均線": ", ".join([MA_LABELS.get(m, m) for m in target_mas]),
-                            "符合警示的均線": ", ".join(triggered_info) if triggered_info else "無接近"
+                            "符合警示的均線": ", ".join(triggered_info) if triggered_info else "無接近/未過濾"
                         })
                     else:
                         summary_data.append({
                             "股票名稱 (代號)": stock_label,
                             "收盤價": "價格無效",
+                            "型態結構": "-",
                             "監控中的均線": "-",
                             "符合警示的均線": "數據缺失"
                         })
                 else:
                     summary_data.append({
                         "股票名稱 (代號)": stock_label,
-                        "收盤價": "代號錯誤/無數據",
+                        "收盤價": "代號錯誤/歷史數據不足",
+                        "型態結構": "-",
                         "監控中的均線": "-",
                         "符合警示的均線": "無法抓取"
                     })
@@ -331,17 +349,17 @@ with tab1:
                     st.error(info)
 
         if all_alerts:
-            st.warning("⚠️ 目前滿足觸發門檻的個股：\n" + "\n".join(all_alerts))
+            st.warning("⚠️ 目前滿足型態結構且觸發門檻的個股：\n" + "\n".join(all_alerts))
             with col_btn2:
                 if st.button("📲 發送選擇均線之 LINE 警示訊息", type="primary"):
-                    msg = f"\n🚨【台股監測警示 - 均線通知】\n門檻設定：{alert_threshold}%\n" + "\n".join(all_alerts).replace("**", "")
+                    msg = f"\n🚨【台股監測警示 - 多頭轉強均線通知】\n門檻設定：{alert_threshold}%\n" + "\n".join(all_alerts).replace("**", "")
                     success, info = send_line_message(line_token, line_user_id, msg)
                     if success:
                         st.success(info)
                     else:
                         st.error(info)
         else:
-            st.info(f"💡 目前清單個股與其指定的監控均線差距均大於 {alert_threshold}%。")
+            st.info(f"💡 目前清單中無符合『短均全在長均之上』且與監控均線差距小於 {alert_threshold}% 的個股。")
 
 # ==========================================
 # Tab 2: 單一個股圖表細節 (完全保持原樣)
@@ -441,7 +459,7 @@ with tab3:
             st.warning("⚠️ 目前無符合條件的股票。")
 
 # ==========================================
-# Tab 4: 🧱 底部大均線尋寶器 (根據新需求嚴格過濾)
+# Tab 4: 🧱 底部大均線尋寶器 (長線支撐型)
 # ==========================================
 with tab4:
     st.subheader("🧱 底部大均線（半年線/年線）佈局器")
@@ -488,34 +506,28 @@ with tab4:
                     vol_lots = vol_shares / 1000.0
                     vol_5ma = float(curr['Vol_5MA']) if pd.notna(curr['Vol_5MA']) else 0
 
-                    # 1. 成交量門檻
                     if vol_lots < min_vol_bottom:
                         continue
 
-                    # 2. 帶量紅 K 判斷 (若勾選)
                     if only_red_bottom:
                         if not (price > open_p and vol_shares >= vol_5ma * 1.2):
                             continue
 
-                    # 3. 🔥 硬性邏輯：5MA, 10MA, 20MA 必須【全部】位於 120MA 與 240MA 之上
                     ma5, ma10, ma20 = float(curr['5MA']), float(curr['10MA']), float(curr['20MA'])
                     ma120, ma240 = float(curr['120MA']), float(curr['240MA'])
 
-                    # 檢查數據完整度
                     if not (pd.notna(ma5) and pd.notna(ma10) and pd.notna(ma20) and pd.notna(ma120) and pd.notna(ma240)):
                         continue
 
                     short_mas_above = (
                         (ma5 > ma120 and ma5 > ma240) and
                         (ma10 > ma120 and ma10 > ma240) and
-                        (ma20 > ma120 and ma240 < ma20)
+                        (ma20 > ma120 and ma20 > ma240)
                     )
 
-                    # 如果有任何一條長均線壓在短均線上，直接剔除
                     if not short_mas_above:
                         continue
 
-                    # 4. 股價與指定大均線距離計算
                     near_info = []
                     min_abs_diff = 999.0
 
@@ -523,7 +535,7 @@ with tab4:
                         ma_val = float(curr[ma_key])
                         diff_pct = ((price - ma_val) / ma_val) * 100
 
-                        if 0 <= diff_pct <= max_dist_pct:  # 因為短均已在線上，只看線上方的正差距
+                        if 0 <= diff_pct <= max_dist_pct:
                             near_info.append(f"{MA_LABELS[ma_key]} (高出 {diff_pct:+.1f}%)")
                             if diff_pct < min_abs_diff:
                                 min_abs_diff = diff_pct
