@@ -72,24 +72,48 @@ def save_settings_to_gsheets(watchlist, ma_settings):
         st.error(f"❌ 寫入 Google Sheets 失敗: {e}")
         return False
 
-# --- 2. 狀態初始化保護機制 ---
+# --- 2. 狀態初始化保護機制 (包含記憶 KD 設定) ---
 if "watchlist" not in st.session_state or "ma_settings" not in st.session_state:
     db_watchlist, db_ma_settings = load_settings_from_gsheets()
     st.session_state.watchlist = db_watchlist
     st.session_state.ma_settings = db_ma_settings
 
+# 記憶 KD 設定關鍵狀態初始化
+if "enable_kd_filter" not in st.session_state:
+    st.session_state.enable_kd_filter = True
+if "max_k_value" not in st.session_state:
+    st.session_state.max_k_value = 70
+if "require_kd_cross" not in st.session_state:
+    st.session_state.require_kd_cross = True
+
 default_token = st.secrets.get("LINE_CHANNEL_ACCESS_TOKEN", "") if "LINE_CHANNEL_ACCESS_TOKEN" in st.secrets else st.session_state.get("line_token", "")
 default_user_id = st.secrets.get("LINE_USER_ID", "") if "LINE_USER_ID" in st.secrets else st.session_state.get("line_user_id", "")
 
-# --- 3. 側邊欄設定 ---
+# --- 3. 側邊欄設定 (雙向綁定 session_state) ---
 st.sidebar.header("⚙️ 均線警示門檻設定")
 alert_threshold = st.sidebar.slider("提醒觸發門檻（股價距離均線 %）", min_value=0.5, max_value=5.0, value=1.5, step=0.1)
 
 st.sidebar.markdown("---")
-st.sidebar.header("📊 Tab 1 KD 指標過濾設定")
-enable_kd_filter = st.sidebar.checkbox("啟用 Tab 1 KD 條件過濾", value=True)
-max_k_value = st.sidebar.slider("K 值上限 (防止追高)", min_value=30, max_value=90, value=70, step=5)
-require_kd_cross = st.sidebar.checkbox("要求 KD 處於多頭/黃金交叉 (K > D)", value=True)
+st.sidebar.header("📊 Tab 1 KD 指標過濾設定 (已紀錄)")
+
+# 使用 key 自動記憶設定狀態，刷新不會遺失
+enable_kd_filter = st.sidebar.checkbox(
+    "啟用 Tab 1 KD 條件過濾", 
+    value=st.session_state.enable_kd_filter, 
+    key="enable_kd_filter"
+)
+max_k_value = st.sidebar.slider(
+    "K 值上限 (防止追高)", 
+    min_value=30, max_value=90, 
+    value=st.session_state.max_k_value, 
+    step=5, 
+    key="max_k_value"
+)
+require_kd_cross = st.sidebar.checkbox(
+    "要求 KD 處於多頭/黃金交叉 (K > D)", 
+    value=st.session_state.require_kd_cross, 
+    key="require_kd_cross"
+)
 
 st.sidebar.markdown("---")
 st.sidebar.header("💬 LINE API 密鑰設定")
@@ -218,7 +242,7 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 ])
 
 # ==========================================
-# Tab 1: 我的最愛管理與對比警示 (新增 KD 指標過濾與 LINE 通知)
+# Tab 1: 我的最愛管理與對比警示
 # ==========================================
 with tab1:
     st.subheader("➕ 新增與管理關注個股 (自動同步至 Google Sheets)")
@@ -298,7 +322,7 @@ with tab1:
                             (ma20 > ma120 and ma20 > ma240)
                         )
 
-                        # 2. KD 指標檢測
+                        # 2. KD 指標檢測 (讀取記憶後的 state)
                         k_val = float(last_row['K']) if pd.notna(last_row['K']) else 0.0
                         d_val = float(last_row['D']) if pd.notna(last_row['D']) else 0.0
                         
@@ -313,7 +337,6 @@ with tab1:
 
                         triggered_info = []
                         
-                        # 同時滿足【短均>長均】與【KD條件】才比對均線距離
                         if short_mas_above and kd_pass:
                             for ma_key in target_mas:
                                 if ma_key in last_row and pd.notna(last_row[ma_key]):
@@ -326,7 +349,6 @@ with tab1:
                                             f"• **{stock_label}** 現價 {price:.2f} 靠近 **{MA_LABELS[ma_key]}** ({ma_val:.2f})，差距 {abs(diff):.1f}% ({pos}) [KD: K={k_val:.1f}, D={d_val:.1f}]"
                                         )
 
-                        # 更新表格狀態欄位
                         ma_status = "短均>長均" if short_mas_above else "短均未過"
                         kd_status = "KD符合" if kd_pass else "KD未符合"
                         
@@ -339,13 +361,9 @@ with tab1:
                             "符合警示的均線": ", ".join(triggered_info) if triggered_info else "無接近/未符合雙條件"
                         })
                     else:
-                        summary_data.append({
-                            "股票名稱 (代號)": stock_label, "收盤價": "價格無效", "型態結構": "-", "KD 指標": "-", "監控中的均線": "-", "符合警示的均線": "數據缺失"
-                        })
+                        summary_data.append({"股票名稱 (代號)": stock_label, "收盤價": "價格無效", "型態結構": "-", "KD 指標": "-", "監控中的均線": "-", "符合警示的均線": "數據缺失"})
                 else:
-                    summary_data.append({
-                        "股票名稱 (代號)": stock_label, "收盤價": "代號錯誤/數據不足", "型態結構": "-", "KD 指標": "-", "監控中的均線": "-", "符合警示的均線": "無法抓取"
-                    })
+                    summary_data.append({"股票名稱 (代號)": stock_label, "收盤價": "代號錯誤/數據不足", "型態結構": "-", "KD 指標": "-", "監控中的均線": "-", "符合警示的均線": "無法抓取"})
 
         if summary_data:
             st.dataframe(pd.DataFrame(summary_data), use_container_width=True)
@@ -371,7 +389,7 @@ with tab1:
         else:
             st.info(f"💡 目前清單中無同時符合『短均全在長均之上』、『KD篩選門檻』且與監控均線差距小於 {alert_threshold}% 的個股。")
 
-# (Tab 2, Tab 3, Tab 4, Tab 5 保持與上版完全一致...)
+# (Tab 2, Tab 3, Tab 4, Tab 5 保持不變...)
 with tab2:
     search_code = st.text_input("輸入台股代號查看技術線圖", value="2330").strip()
     if search_code:
