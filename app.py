@@ -95,7 +95,7 @@ st.sidebar.header("⚙️ 參數設定")
 
 alert_threshold = st.sidebar.slider(
     "提醒觸發門檻（股價距離均線 %）", 
-    min_value=0.5, max_value=5.0, value=2.0, step=0.1
+    min_value=0.5, max_value=5.0, value=1.0, step=0.1
 )
 
 st.sidebar.markdown("---")
