@@ -4,17 +4,17 @@ on:
   schedule:
     # UTC 時間：週一至週五 01:00 ~ 05:30 (對應台灣時間 09:00 ~ 13:30，每 30 分鐘執行一次)
     - cron: '0,30 1-5 * * 1-5'
-  workflow_dispatch: # 支援在 GitHub 網頁上進行手動測試觸發
+  workflow_dispatch:
 
 jobs:
   check-and-notify:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
