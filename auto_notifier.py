@@ -3,9 +3,15 @@ import json
 import requests
 import pandas as pd
 import yfinance as yf
-import twstock
 from google.oauth2.service_account import Credentials
 import gspread
+
+# 嘗試載入 twstock，若未安裝或失敗則不影響程式運作
+try:
+    import twstock
+    HAS_TWSTOCK = True
+except ImportError:
+    HAS_TWSTOCK = False
 
 # --- 1. 環境變數讀取 ---
 LINE_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
@@ -28,17 +34,20 @@ BUILTIN_STOCKS = {
     "00878": "國泰永續高股息", "00919": "群益台灣精選高息", "00929": "復華台灣科技優息"
 }
 
-# --- 2. 股票名稱查詢工具 ---
+# --- 2. 安全版股票名稱查詢 ---
 def get_stock_name(code):
     clean_code = str(code).replace(".TW", "").replace(".TWO", "").strip()
     if clean_code in BUILTIN_STOCKS:
         return BUILTIN_STOCKS[clean_code]
-    try:
-        if clean_code in twstock.codes:
-            name = twstock.codes[clean_code].name
-            if name: return name
-    except Exception:
-        pass
+    
+    if HAS_TWSTOCK:
+        try:
+            if clean_code in twstock.codes:
+                name = twstock.codes[clean_code].name
+                if name: return name
+        except Exception:
+            pass
+            
     try:
         symbol = f"{clean_code}.TW"
         info = yf.Ticker(symbol).info
@@ -46,6 +55,7 @@ def get_stock_name(code):
         if name: return name
     except Exception:
         pass
+        
     return clean_code
 
 def get_stock_label(code):
@@ -84,9 +94,6 @@ def get_watchlist_from_gsheets():
                 mas_list = [m.strip() for m in mas_str.split(",") if m.strip() in ALL_MAS]
                 ma_settings[stock] = mas_list if mas_list else ALL_MAS.copy()
         return watchlist, ma_settings
-    except json.JSONDecodeError as e:
-        print(f"❌ 錯誤：GCP_SERVICE_ACCOUNT 不是有效的 JSON 格式！: {e}")
-        return [], {}
     except Exception as e:
         print(f"❌ 讀取 Google Sheets 失敗: {e}")
         return [], {}
@@ -135,41 +142,44 @@ def send_line_message(token, user_id, text):
 
 # --- 6. 主程式 ---
 def main():
-    watchlist, ma_settings = get_watchlist_from_gsheets()
-    if not watchlist:
-        print("⚠️ 關注清單為空或讀取失敗，程式結束。")
-        return
+    try:
+        watchlist, ma_settings = get_watchlist_from_gsheets()
+        if not watchlist:
+            print("⚠️ 關注清單為空或讀取失敗，程式結束。")
+            return
 
-    all_alerts = []
-    print(f"正在比對 {len(watchlist)} 档股票數據...")
+        all_alerts = []
+        print(f"正在比對 {len(watchlist)} 檔股票數據...")
 
-    for code in watchlist:
-        df = load_stock_data(code)
-        if df is not None and not df.empty:
-            last_row = df.iloc[-1]
-            price = float(last_row['Close'])
-            target_mas = ma_settings.get(code, ALL_MAS)
-            stock_label = get_stock_label(code)  # 取得股票名稱 (代號)
+        for code in watchlist:
+            df = load_stock_data(code)
+            if df is not None and not df.empty:
+                last_row = df.iloc[-1]
+                price = float(last_row['Close'])
+                target_mas = ma_settings.get(code, ALL_MAS)
+                stock_label = get_stock_label(code)
 
-            for ma_key in target_mas:
-                if ma_key in last_row and pd.notna(last_row[ma_key]):
-                    ma_val = float(last_row[ma_key])
-                    diff = ((price - ma_val) / ma_val) * 100
-                    if abs(diff) <= ALERT_THRESHOLD:
-                        pos = "站上" if diff >= 0 else "跌破"
-                        all_alerts.append(
-                            f"• {stock_label} 現價 {price:.2f} 靠近 {MA_LABELS[ma_key]} ({ma_val:.2f})，差距 {abs(diff):.1f}% ({pos})"
-                        )
+                for ma_key in target_mas:
+                    if ma_key in last_row and pd.notna(last_row[ma_key]):
+                        ma_val = float(last_row[ma_key])
+                        diff = ((price - ma_val) / ma_val) * 100
+                        if abs(diff) <= ALERT_THRESHOLD:
+                            pos = "站上" if diff >= 0 else "跌破"
+                            all_alerts.append(
+                                f"• {stock_label} 現價 {price:.2f} 靠近 {MA_LABELS[ma_key]} ({ma_val:.2f})，差距 {abs(diff):.1f}% ({pos})"
+                            )
 
-    if all_alerts:
-        msg = f"\n🚨【盤中定時均線警示】\n門檻：{ALERT_THRESHOLD}%\n" + "\n".join(all_alerts)
-        success = send_line_message(LINE_TOKEN, LINE_USER_ID, msg)
-        if success:
-            print("✅ 警示訊息已成功發送至 LINE！")
+        if all_alerts:
+            msg = f"\n🚨【盤中定時均線警示】\n門檻：{ALERT_THRESHOLD}%\n" + "\n".join(all_alerts)
+            success = send_line_message(LINE_TOKEN, LINE_USER_ID, msg)
+            if success:
+                print("✅ 警示訊息已成功發送至 LINE！")
+            else:
+                print("❌ LINE 訊息發送失敗！")
         else:
-            print("❌ LINE 訊息發送失敗！")
-    else:
-        print("💡 目前無股票符合均線警示門檻。")
+            print("💡 目前無股票符合均線警示門檻。")
+    except Exception as main_e:
+        print(f"❌ 主程式執行發生未預期例外: {main_e}")
 
 if __name__ == "__main__":
     main()
