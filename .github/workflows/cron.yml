@@ -2,7 +2,7 @@ name: Stock MA Auto Notifier
 
 on:
   schedule:
-    - cron: '0,30 1-5 * * 1-5'
+    - cron: '*/5 1-5 * * 1-5'
   workflow_dispatch:
 
 jobs:
