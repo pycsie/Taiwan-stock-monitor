@@ -1,9 +1,9 @@
 name: Stock MA Auto Notifier
 
 on:
-  schedule:
-    - cron: '0,15,30,45 1-5 * * 1-5'
-  workflow_dispatch:
+  repository_dispatch:
+    types: [trigger-stock-check]
+  workflow_dispatch: # 保留手動觸發按鈕
 
 jobs:
   check-and-notify:
