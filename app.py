@@ -80,7 +80,7 @@ def save_settings_to_gsheets(watchlist, ma_settings):
         st.error(f"❌ 寫入 Google Sheets 失敗: {e}")
         return False
 
-# --- 2. 🔥 狀態初始化保護機制 (防止重新整理時覆蓋) ---
+# --- 2. 狀態初始化保護機制 ---
 if "watchlist" not in st.session_state or "ma_settings" not in st.session_state:
     db_watchlist, db_ma_settings = load_settings_from_gsheets()
     st.session_state.watchlist = db_watchlist
@@ -155,14 +155,13 @@ def send_line_message(token, user_id, text):
     except Exception as e:
         return False, f"發送異常: {str(e)}"
 
-# --- 擴充：計算指標與 5日均量 ---
+# --- 擴充：計算技術指標與 5日均量 ---
 def calculate_indicators(df):
     for ma in [5, 10, 20, 60, 120, 240]:
         df[f'{ma}MA'] = df['Close'].rolling(ma).mean()
     
     df['Vol_5MA'] = df['Volume'].rolling(5).mean()
 
-    # 計算 KD (9, 3, 3)
     low_min = df['Low'].rolling(9).min()
     high_max = df['High'].rolling(9).max()
     rsv = (df['Close'] - low_min) / (high_max - low_min) * 100
@@ -201,8 +200,13 @@ def load_stock_data(stock_id):
             continue
     return None
 
-# --- 5. 主介面 Tabs ---
-tab1, tab2, tab3 = st.tabs(["⭐ 我的最愛與自訂均線 (DB連動)", "🔍 單一個股圖表細節", "🚀 全台股帶量紅K短線轉強掃描"])
+# --- 5. 主介面 Tabs (新增第 4 個 Tab) ---
+tab1, tab2, tab3, tab4 = st.tabs([
+    "⭐ 我的最愛與自訂均線 (DB連動)", 
+    "🔍 單一個股圖表細節", 
+    "🚀 帶量紅K短線轉強掃描",
+    "🧱 底部大均線尋寶器 (季/半年/年線)"
+])
 
 # ==========================================
 # Tab 1: 我的最愛管理與對比警示 (完全保持原樣)
@@ -365,19 +369,19 @@ with tab2:
             st.plotly_chart(fig, use_container_width=True)
 
 # ==========================================
-# Tab 3: 🚀 全台股帶量紅K短線轉強掃描 (修訂邏輯)
+# Tab 3: 🚀 帶量紅K短線轉強掃描
 # ==========================================
 with tab3:
     st.subheader("🚀 全台股帶量紅 K 與均線上彎掃描器")
-    st.caption("嚴格篩選條件：【成交量 > 2000張】＋【收盤 > 開盤 (紅K)】＋【成交量 > 5日均量1.3倍 (帶量)】＋【5MA / 10MA / 月線(20MA) 剛扣低轉上彎至少一條】")
+    st.caption("硬性條件：【成交量 > 2000張】＋【帶量紅K (量>5日均量1.3倍)】＋【5MA / 10MA / 20MA 至少有一條扣低轉上彎】")
 
     col_v, col_s = st.columns(2)
     with col_v:
-        min_vol_lots = st.number_input("成交量防護門檻 (張)", min_value=500, value=2000, step=500)
+        min_vol_lots = st.number_input("成交量防護門檻 (張)", min_value=500, value=2000, step=500, key="t3_vol")
     with col_s:
-        scan_scope = st.selectbox("掃描標的範圍", ["熱門大型與權值股 (約 30 檔 - 快速)", "全台股上市上櫃 (約 1800 檔 - 需較長時間)"])
+        scan_scope = st.selectbox("掃描標的範圍", ["熱門大型與權值股 (約 30 檔 - 快速)", "全台股上市上櫃 (約 1800 檔 - 需較長時間)"], key="t3_scope")
 
-    if st.button("🔍 開始掃描強勢標的", type="primary"):
+    if st.button("🔍 開始掃描強勢標的", type="primary", key="btn_t3"):
         target_codes = []
         if scan_scope.startswith("熱門大型"):
             target_codes = list(BUILTIN_STOCKS.keys()) + [
@@ -390,7 +394,7 @@ with tab3:
                     if info.type == "股票" and len(code) == 4 and code.isdigit():
                         target_codes.append(code)
 
-        st.info(f"正在掃描 {len(target_codes)} 檔股票數據，請稍候...")
+        st.info(f"正在掃描 {len(target_codes)} 檔股票數據...")
         p_bar = st.progress(0)
         scan_results = []
 
@@ -403,48 +407,123 @@ with tab3:
                 prev = df.iloc[-2]
                 prev2 = df.iloc[-3]
 
-                open_price = float(curr['Open'])
-                close_price = float(curr['Close'])
+                open_p = float(curr['Open'])
+                close_p = float(curr['Close'])
                 vol_shares = float(curr['Volume'])
                 vol_lots = vol_shares / 1000.0
                 vol_5ma = float(curr['Vol_5MA']) if pd.notna(curr['Vol_5MA']) else 0
 
-                # 條件 1：成交量門檻
-                cond_vol = vol_lots >= min_vol_lots
+                if vol_lots >= min_vol_lots and close_p > open_p and (vol_5ma > 0 and vol_shares >= vol_5ma * 1.3):
+                    up_mas = []
+                    for ma_key, ma_name in [('5MA', '5日線'), ('10MA', '10日線'), ('20MA', '月線')]:
+                        if pd.notna(curr[ma_key]) and pd.notna(prev[ma_key]) and pd.notna(prev2[ma_key]):
+                            c_ma, p_ma, p2_ma = float(curr[ma_key]), float(prev[ma_key]), float(prev2[ma_key])
+                            if p_ma <= p2_ma and c_ma > p_ma and close_p >= c_ma:
+                                up_mas.append(ma_name)
 
-                # 條件 2：帶量紅 K (當日收盤 > 開盤 且 當日量 > 5日均量 1.3 倍)
-                is_red_k = close_price > open_price
-                is_heavy_vol = (vol_5ma > 0) and (vol_shares >= vol_5ma * 1.3)
-                cond_red_heavy = is_red_k and is_heavy_vol
-
-                # 條件 3：均線上彎 (5MA / 10MA / 20MA 至少有一條扣低轉上彎)
-                up_mas = []
-                for ma_key, ma_name in [('5MA', '5日線'), ('10MA', '10日線'), ('20MA', '月線(20MA)')]:
-                    if pd.notna(curr[ma_key]) and pd.notna(prev[ma_key]) and pd.notna(prev2[ma_key]):
-                        c_ma, p_ma, p2_ma = float(curr[ma_key]), float(prev[ma_key]), float(prev2[ma_key])
-                        # 昨天<=前天，今天>昨天，且價格在均線上
-                        if p_ma <= p2_ma and c_ma > p_ma and close_price >= c_ma:
-                            up_mas.append(ma_name)
-
-                cond_ma_up = len(up_mas) > 0
-
-                # 必須【同時滿足】三大硬性條件
-                if cond_vol and cond_red_heavy and cond_ma_up:
-                    vol_multiple = (vol_shares / vol_5ma) if vol_5ma > 0 else 0
-                    scan_results.append({
-                        "股票代號/名稱": get_stock_label(code),
-                        "收盤價": f"{close_price:.2f}",
-                        "漲跌K線": f"🔴 紅K (+{(close_price - open_price):.2f})",
-                        "成交量 (張)": int(vol_lots),
-                        "量增倍數": f"{vol_multiple:.1f} 倍",
-                        "轉上彎均線": "、".join(up_mas),
-                        "KD (K值)": round(float(curr['K']), 1) if pd.notna(curr['K']) else "-"
-                    })
+                    if len(up_mas) > 0:
+                        vol_mult = (vol_shares / vol_5ma) if vol_5ma > 0 else 0
+                        scan_results.append({
+                            "股票代號/名稱": get_stock_label(code),
+                            "收盤價": f"{close_p:.2f}",
+                            "漲跌K線": f"🔴 紅K (+{(close_p - open_p):.2f})",
+                            "成交量 (張)": int(vol_lots),
+                            "量增倍數": f"{vol_mult:.1f} 倍",
+                            "轉上彎均線": "、".join(up_mas),
+                            "KD (K值)": round(float(curr['K']), 1) if pd.notna(curr['K']) else "-"
+                        })
 
         p_bar.empty()
-
         if scan_results:
-            st.success(f"🎉 掃描完成！符合【成交量 > {min_vol_lots}張】＋【帶量紅K】＋【短/月均線上彎】的股票共有 {len(scan_results)} 檔：")
+            st.success(f"🎉 找到 {len(scan_results)} 檔短線轉強標的：")
             st.dataframe(pd.DataFrame(scan_results), use_container_width=True)
         else:
-            st.warning("⚠️ 目前無符合所有硬性條件（帶量紅K + 5/10/月均向上）的股票，可以嘗試降低成交量門檻再試一次。")
+            st.warning("⚠️ 目前無符合條件的股票。")
+
+# ==========================================
+# Tab 4: 🧱 底部大均線尋寶器 (全新功能)
+# ==========================================
+with tab4:
+    st.subheader("🧱 底部大均線（季線/半年線/年線）附近佈局器")
+    st.caption("篩選當前股價貼近季線(60MA)、半年線(120MA) 或 年線(240MA) 的股票，適合大均線附近抄底與建倉。")
+
+    col_target_ma, col_dist, col_v4 = st.columns(3)
+    with col_target_ma:
+        selected_bottom_mas = st.multiselect(
+            "選擇要比對的底部大均線：",
+            options=['60MA', '120MA', '240MA'],
+            default=['60MA', '240MA'],
+            format_func=lambda x: f"{x} ({MA_LABELS[x]})"
+        )
+    with col_dist:
+        max_dist_pct = st.number_input("股價距離大均線範圍 (±%)", min_value=0.5, max_value=8.0, value=3.0, step=0.5)
+    with col_v4:
+        min_vol_bottom = st.number_input("成交量門檻 (張)", min_value=500, value=2000, step=500, key="t4_vol")
+
+    only_red = st.checkbox("只顯示帶量紅 K（成交量 > 5日均量 1.2倍 且 當日收紅）", value=True)
+
+    if st.button("🔍 掃描大均線底部個股", type="primary", key="btn_t4"):
+        if not selected_bottom_mas:
+            st.error("請至少選擇一條大均線進行比對！")
+        else:
+            target_codes = []
+            with st.spinner("載入全台股清單中..."):
+                for code, info in twstock.codes.items():
+                    if info.type == "股票" and len(code) == 4 and code.isdigit():
+                        target_codes.append(code)
+
+            st.info(f"正在分析 {len(target_codes)} 檔股票之大均線距離...")
+            p_bar4 = st.progress(0)
+            bottom_results = []
+
+            for idx, code in enumerate(target_codes):
+                p_bar4.progress((idx + 1) / len(target_codes))
+                df = load_stock_data(code)
+
+                if df is not None and not df.empty and len(df) >= 240:
+                    curr = df.iloc[-1]
+                    price = float(curr['Close'])
+                    open_p = float(curr['Open'])
+                    vol_shares = float(curr['Volume'])
+                    vol_lots = vol_shares / 1000.0
+                    vol_5ma = float(curr['Vol_5MA']) if pd.notna(curr['Vol_5MA']) else 0
+
+                    if vol_lots >= min_vol_bottom:
+                        # 如果有勾選「只顯示帶量紅K」
+                        if only_red:
+                            if not (price > open_p and vol_shares >= vol_5ma * 1.2):
+                                continue
+
+                        near_info = []
+                        min_abs_diff = 999.0
+
+                        for ma_key in selected_bottom_mas:
+                            if ma_key in curr and pd.notna(curr[ma_key]):
+                                ma_val = float(curr[ma_key])
+                                diff_pct = ((price - ma_val) / ma_val) * 100
+
+                                if abs(diff_pct) <= max_dist_pct:
+                                    pos_str = "線上方" if diff_pct >= 0 else "線下方"
+                                    near_info.append(f"{MA_LABELS[ma_key]} (距 {diff_pct:+.1f}%, {pos_str})")
+                                    if abs(diff_pct) < min_abs_diff:
+                                        min_abs_diff = abs(diff_pct)
+
+                        if near_info:
+                            bottom_results.append({
+                                "股票代號/名稱": get_stock_label(code),
+                                "收盤價": f"{price:.2f}",
+                                "成交量 (張)": int(vol_lots),
+                                "貼近之大均線": " | ".join(near_info),
+                                "KD (K值)": round(float(curr['K']), 1) if pd.notna(curr['K']) else "-",
+                                "差距絕對值": min_abs_diff
+                            })
+
+            p_bar4.empty()
+
+            if bottom_results:
+                # 依距離大均線最近者排序
+                res_df = pd.DataFrame(bottom_results).sort_values("差距絕對值").drop(columns=["差距絕對值"])
+                st.success(f"🎉 找到 {len(res_df)} 檔貼近【{', '.join([MA_LABELS[m] for m in selected_bottom_mas])}】附近的標的：")
+                st.dataframe(res_df, use_container_width=True)
+            else:
+                st.warning("⚠️ 目前無符合大均線範圍條件的標的，請嘗試放寬距離範圍 %。")
