@@ -19,7 +19,7 @@ LINE_USER_ID = os.environ.get("LINE_USER_ID", "").strip()
 GCP_SA_JSON = os.environ.get("GCP_SERVICE_ACCOUNT", "").strip()
 SPREADSHEET_KEY = os.environ.get("SPREADSHEET_KEY", "").strip()
 
-ALERT_THRESHOLD = 2.0  # 觸發門檻 (%)
+ALERT_THRESHOLD = 1.5  # 觸發門檻 (%)
 
 ALL_MAS = ['5MA', '10MA', '20MA', '60MA', '120MA', '240MA']
 MA_LABELS = {
