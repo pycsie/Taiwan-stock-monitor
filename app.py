@@ -24,19 +24,37 @@ BUILTIN_STOCKS = {
     "00878": "國泰永續高股息", "00919": "群益台灣精選高息", "00929": "復華台灣科技優息"
 }
 
-# --- 1. Google Sheets 資料庫連線與讀寫函數 ---
+# --- 1. Google Sheets 資料庫連線與讀寫函數 (含 KD 設定雲端持久化) ---
 def get_gsheet_connection():
     return st.connection("gsheets", type=GSheetsConnection)
 
 def load_settings_from_gsheets():
+    default_watchlist = ["2330", "0050"]
+    default_ma_settings = {"2330": ['20MA', '60MA', '240MA'], "0050": ALL_MAS.copy()}
+    default_enable_kd = True
+    default_max_k = 70
+
     try:
         conn = get_gsheet_connection()
         df = conn.read(worksheet="Watchlist", ttl=0)
         if df is None or df.empty:
-            return ["2330", "0050"], {"2330": ['20MA', '60MA', '240MA'], "0050": ALL_MAS.copy()}
+            return default_watchlist, default_ma_settings, default_enable_kd, default_max_k
+        
         df = df.dropna(how='all')
         watchlist = []
         ma_settings = {}
+        
+        # 嘗試讀取第一列的通用 KD 全域設定欄位
+        enable_kd = default_enable_kd
+        max_k = default_max_k
+        if 'Enable_KD' in df.columns and pd.notna(df.iloc[0]['Enable_KD']):
+            enable_kd = bool(df.iloc[0]['Enable_KD'])
+        if 'Max_K' in df.columns and pd.notna(df.iloc[0]['Max_K']):
+            try:
+                max_k = int(df.iloc[0]['Max_K'])
+            except ValueError:
+                pass
+
         for _, row in df.iterrows():
             stock_val = row.get('Stock', '')
             if pd.notna(stock_val):
@@ -47,24 +65,29 @@ def load_settings_from_gsheets():
                     mas_str = str(mas_val) if pd.notna(mas_val) else ""
                     mas_list = [m.strip() for m in mas_str.split(",") if m.strip() in ALL_MAS]
                     ma_settings[code] = mas_list if mas_list else ALL_MAS.copy()
+                    
         if not watchlist:
-            watchlist = ["2330", "0050"]
-            ma_settings = {"2330": ['20MA', '60MA', '240MA'], "0050": ALL_MAS.copy()}
-        return watchlist, ma_settings
+            watchlist, ma_settings = default_watchlist, default_ma_settings
+            
+        return watchlist, ma_settings, enable_kd, max_k
     except Exception as e:
         st.error(f"⚠️ Google Sheets 連線或讀取失敗，使用暫存資料。錯誤細節: {e}")
-        if "watchlist" in st.session_state and "ma_settings" in st.session_state:
-            return st.session_state.watchlist, st.session_state.ma_settings
-        return ["2330", "0050"], {"2330": ['20MA', '60MA', '240MA'], "0050": ALL_MAS.copy()}
+        return default_watchlist, default_ma_settings, default_enable_kd, default_max_k
 
-def save_settings_to_gsheets(watchlist, ma_settings):
+def save_settings_to_gsheets(watchlist, ma_settings, enable_kd, max_k):
     try:
         conn = get_gsheet_connection()
         rows = []
-        for code in watchlist:
+        for idx, code in enumerate(watchlist):
             mas = ma_settings.get(code, ALL_MAS)
             mas_str = ", ".join(mas)
-            rows.append({"Stock": str(code), "MAs": mas_str})
+            # 將 KD 設定同步寫入 Google Sheets 欄位中
+            rows.append({
+                "Stock": str(code), 
+                "MAs": mas_str,
+                "Enable_KD": enable_kd,
+                "Max_K": max_k
+            })
         new_df = pd.DataFrame(rows)
         conn.update(worksheet="Watchlist", data=new_df)
         return True
@@ -72,47 +95,48 @@ def save_settings_to_gsheets(watchlist, ma_settings):
         st.error(f"❌ 寫入 Google Sheets 失敗: {e}")
         return False
 
-# --- 2. 狀態初始化保護機制 (包含記憶 KD 設定) ---
-if "watchlist" not in st.session_state or "ma_settings" not in st.session_state:
-    db_watchlist, db_ma_settings = load_settings_from_gsheets()
+# --- 2. 狀態初始化保護機制 (全數從雲端載入) ---
+if "watchlist" not in st.session_state or "enable_kd_filter" not in st.session_state:
+    db_watchlist, db_ma_settings, db_enable_kd, db_max_k = load_settings_from_gsheets()
     st.session_state.watchlist = db_watchlist
     st.session_state.ma_settings = db_ma_settings
-
-# 記憶 KD 設定關鍵狀態初始化
-if "enable_kd_filter" not in st.session_state:
-    st.session_state.enable_kd_filter = True
-if "max_k_value" not in st.session_state:
-    st.session_state.max_k_value = 70
-if "require_kd_cross" not in st.session_state:
-    st.session_state.require_kd_cross = True
+    st.session_state.enable_kd_filter = db_enable_kd
+    st.session_state.max_k_value = db_max_k
 
 default_token = st.secrets.get("LINE_CHANNEL_ACCESS_TOKEN", "") if "LINE_CHANNEL_ACCESS_TOKEN" in st.secrets else st.session_state.get("line_token", "")
 default_user_id = st.secrets.get("LINE_USER_ID", "") if "LINE_USER_ID" in st.secrets else st.session_state.get("line_user_id", "")
 
-# --- 3. 側邊欄設定 (雙向綁定 session_state) ---
+# --- 3. 側邊欄設定與雲端異步同步函數 ---
+def on_kd_setting_change():
+    """當 KD 設定改變時自動儲存至 Google Sheets"""
+    st.session_state.enable_kd_filter = st.session_state.input_enable_kd
+    st.session_state.max_k_value = st.session_state.input_max_k
+    save_settings_to_gsheets(
+        st.session_state.watchlist,
+        st.session_state.ma_settings,
+        st.session_state.enable_kd_filter,
+        st.session_state.max_k_value
+    )
+
 st.sidebar.header("⚙️ 均線警示門檻設定")
 alert_threshold = st.sidebar.slider("提醒觸發門檻（股價距離均線 %）", min_value=0.5, max_value=5.0, value=1.5, step=0.1)
 
 st.sidebar.markdown("---")
-st.sidebar.header("📊 Tab 1 KD 指標過濾設定 (已紀錄)")
+st.sidebar.header("📊 Tab 1 KD 指標過濾設定 (雲端同步)")
 
-# 使用 key 自動記憶設定狀態，刷新不會遺失
 enable_kd_filter = st.sidebar.checkbox(
     "啟用 Tab 1 KD 條件過濾", 
-    value=st.session_state.enable_kd_filter, 
-    key="enable_kd_filter"
+    value=st.session_state.enable_kd_filter,
+    key="input_enable_kd",
+    on_change=on_kd_setting_change
 )
 max_k_value = st.sidebar.slider(
-    "K 值上限 (防止追高)", 
+    "K 值上限 (高於此值不警示)", 
     min_value=30, max_value=90, 
     value=st.session_state.max_k_value, 
-    step=5, 
-    key="max_k_value"
-)
-require_kd_cross = st.sidebar.checkbox(
-    "要求 KD 處於多頭/黃金交叉 (K > D)", 
-    value=st.session_state.require_kd_cross, 
-    key="require_kd_cross"
+    step=5,
+    key="input_max_k",
+    on_change=on_kd_setting_change
 )
 
 st.sidebar.markdown("---")
@@ -125,9 +149,11 @@ st.session_state.line_user_id = line_user_id
 
 st.sidebar.markdown("---")
 if st.sidebar.button("🔄 從 Google Sheets 強制重新載入"):
-    db_watchlist, db_ma_settings = load_settings_from_gsheets()
+    db_watchlist, db_ma_settings, db_enable_kd, db_max_k = load_settings_from_gsheets()
     st.session_state.watchlist = db_watchlist
     st.session_state.ma_settings = db_ma_settings
+    st.session_state.enable_kd_filter = db_enable_kd
+    st.session_state.max_k_value = db_max_k
     st.cache_data.clear()
     st.success("已成功重新載入雲端設定！")
     st.rerun()
@@ -259,7 +285,12 @@ with tab1:
                 if clean_new not in st.session_state.watchlist:
                     st.session_state.watchlist.append(clean_new)
                     st.session_state.ma_settings[clean_new] = ALL_MAS.copy()
-                    save_settings_to_gsheets(st.session_state.watchlist, st.session_state.ma_settings)
+                    save_settings_to_gsheets(
+                        st.session_state.watchlist, 
+                        st.session_state.ma_settings,
+                        st.session_state.enable_kd_filter,
+                        st.session_state.max_k_value
+                    )
                     st.success(f"已新增 {clean_new} 並儲存！")
                     st.rerun()
 
@@ -269,7 +300,12 @@ with tab1:
     def update_ma_setting(code):
         selected = st.session_state[f"ms_{code}"]
         st.session_state.ma_settings[code] = selected
-        save_settings_to_gsheets(st.session_state.watchlist, st.session_state.ma_settings)
+        save_settings_to_gsheets(
+            st.session_state.watchlist, 
+            st.session_state.ma_settings,
+            st.session_state.enable_kd_filter,
+            st.session_state.max_k_value
+        )
 
     for code in list(st.session_state.watchlist):
         stock_label = get_stock_label(code)
@@ -280,7 +316,12 @@ with tab1:
                     st.session_state.watchlist.remove(code)
                     if code in st.session_state.ma_settings:
                         del st.session_state.ma_settings[code]
-                    save_settings_to_gsheets(st.session_state.watchlist, st.session_state.ma_settings)
+                    save_settings_to_gsheets(
+                        st.session_state.watchlist, 
+                        st.session_state.ma_settings,
+                        st.session_state.enable_kd_filter,
+                        st.session_state.max_k_value
+                    )
                     st.rerun()
             with col_select:
                 current_selected = st.session_state.ma_settings.get(code, ALL_MAS)
@@ -293,7 +334,7 @@ with tab1:
 
     st.markdown("---")
     st.subheader("📊 清單即時均線與 KD 雙重警示比對")
-    st.caption("🛡️ 警示雙重門檻：【短線均線 (5MA/10MA/20MA) 必須全數站上 120MA & 240MA】＋【符合側邊欄設定之 KD 指標】才會觸發。")
+    st.caption("🛡️ 警示雙重門檻：【短線均線 (5MA/10MA/20MA) 必須全數站上 120MA & 240MA】＋【符合側邊欄 K 值上限】才會觸發。")
 
     all_alerts = []
     summary_data = []
@@ -322,18 +363,15 @@ with tab1:
                             (ma20 > ma120 and ma20 > ma240)
                         )
 
-                        # 2. KD 指標檢測 (讀取記憶後的 state)
+                        # 2. KD 指標檢測（已移除 K > D 條件，僅比對 K 值上限）
                         k_val = float(last_row['K']) if pd.notna(last_row['K']) else 0.0
                         d_val = float(last_row['D']) if pd.notna(last_row['D']) else 0.0
                         
                         kd_pass = True
                         kd_desc = f"K:{k_val:.1f} / D:{d_val:.1f}"
                         
-                        if enable_kd_filter:
-                            if k_val > max_k_value:
-                                kd_pass = False
-                            if require_kd_cross and not (k_val > d_val):
-                                kd_pass = False
+                        if enable_kd_filter and (k_val > max_k_value):
+                            kd_pass = False
 
                         triggered_info = []
                         
@@ -350,7 +388,7 @@ with tab1:
                                         )
 
                         ma_status = "短均>長均" if short_mas_above else "短均未過"
-                        kd_status = "KD符合" if kd_pass else "KD未符合"
+                        kd_status = "KD符合" if kd_pass else "KD超標"
                         
                         summary_data.append({
                             "股票名稱 (代號)": stock_label,
@@ -382,14 +420,14 @@ with tab1:
             st.warning("⚠️ 目前同時滿足【型態結構】＋【KD條件】且觸發門檻的個股：\n" + "\n".join(all_alerts))
             with col_btn2:
                 if st.button("📲 發送選擇均線之 LINE 警示訊息", type="primary"):
-                    kd_filter_text = f"(KD限制: K≤{max_k_value}" + (", 要求K>D)" if require_kd_cross else ")") if enable_kd_filter else "(未啟用KD限制)"
+                    kd_filter_text = f"(KD限制: K≤{max_k_value})" if enable_kd_filter else "(未啟用KD限制)"
                     msg = f"\n🚨【台股監測警示 - 均線+KD通知】\n門檻設定：{alert_threshold}%\n{kd_filter_text}\n" + "\n".join(all_alerts).replace("**", "")
                     success, info = send_line_message(line_token, line_user_id, msg)
                     st.success(info) if success else st.error(info)
         else:
-            st.info(f"💡 目前清單中無同時符合『短均全在長均之上』、『KD篩選門檻』且與監控均線差距小於 {alert_threshold}% 的個股。")
+            st.info(f"💡 目前清單中無同時符合『短均全在長均之上』、『KD 門檻』且與監控均線差距小於 {alert_threshold}% 的個股。")
 
-# (Tab 2, Tab 3, Tab 4, Tab 5 保持不變...)
+# (Tab 2, Tab 3, Tab 4, Tab 5 保持與上版完全一致...)
 with tab2:
     search_code = st.text_input("輸入台股代號查看技術線圖", value="2330").strip()
     if search_code:
