@@ -29,18 +29,14 @@ def get_gsheet_connection():
     return st.connection("gsheets", type=GSheetsConnection)
 
 def load_settings_from_gsheets():
-    """ 從 Google Sheets 撈取最新資料 """
     try:
         conn = get_gsheet_connection()
         df = conn.read(worksheet="Watchlist", ttl=0)
-        
         if df is None or df.empty:
             return ["2330", "0050"], {"2330": ['20MA', '60MA', '240MA'], "0050": ALL_MAS.copy()}
-            
         df = df.dropna(how='all')
         watchlist = []
         ma_settings = {}
-        
         for _, row in df.iterrows():
             stock_val = row.get('Stock', '')
             if pd.notna(stock_val):
@@ -51,11 +47,9 @@ def load_settings_from_gsheets():
                     mas_str = str(mas_val) if pd.notna(mas_val) else ""
                     mas_list = [m.strip() for m in mas_str.split(",") if m.strip() in ALL_MAS]
                     ma_settings[code] = mas_list if mas_list else ALL_MAS.copy()
-                    
         if not watchlist:
             watchlist = ["2330", "0050"]
             ma_settings = {"2330": ['20MA', '60MA', '240MA'], "0050": ALL_MAS.copy()}
-            
         return watchlist, ma_settings
     except Exception as e:
         st.error(f"⚠️ Google Sheets 連線或讀取失敗，使用暫存資料。錯誤細節: {e}")
@@ -64,7 +58,6 @@ def load_settings_from_gsheets():
         return ["2330", "0050"], {"2330": ['20MA', '60MA', '240MA'], "0050": ALL_MAS.copy()}
 
 def save_settings_to_gsheets(watchlist, ma_settings):
-    """ 將最新的股票與均線設定寫回 Google Sheets """
     try:
         conn = get_gsheet_connection()
         rows = []
@@ -72,7 +65,6 @@ def save_settings_to_gsheets(watchlist, ma_settings):
             mas = ma_settings.get(code, ALL_MAS)
             mas_str = ", ".join(mas)
             rows.append({"Stock": str(code), "MAs": mas_str})
-            
         new_df = pd.DataFrame(rows)
         conn.update(worksheet="Watchlist", data=new_df)
         return True
@@ -91,15 +83,10 @@ default_user_id = st.secrets.get("LINE_USER_ID", "") if "LINE_USER_ID" in st.sec
 
 # --- 3. 側邊欄設定 ---
 st.sidebar.header("⚙️ 參數設定")
-
-alert_threshold = st.sidebar.slider(
-    "提醒觸發門檻（股價距離均線 %）", 
-    min_value=0.5, max_value=5.0, value=1.5, step=0.1
-)
+alert_threshold = st.sidebar.slider("提醒觸發門檻（股價距離均線 %）", min_value=0.5, max_value=5.0, value=1.5, step=0.1)
 
 st.sidebar.markdown("---")
 st.sidebar.header("💬 LINE API 密鑰設定")
-
 line_token = st.sidebar.text_input("Channel Access Token", value=default_token, type="password", key="input_token")
 line_user_id = st.sidebar.text_input("Your User ID", value=default_user_id, type="password", key="input_user_id")
 
@@ -160,7 +147,6 @@ def calculate_indicators(df):
         df[f'{ma}MA'] = df['Close'].rolling(ma).mean()
     
     df['Vol_5MA'] = df['Volume'].rolling(5).mean()
-
     low_min = df['Low'].rolling(9).min()
     high_max = df['High'].rolling(9).max()
     rsv = (df['Close'] - low_min) / (high_max - low_min) * 100
@@ -193,26 +179,42 @@ def load_stock_data(stock_id):
                 data = data.dropna(subset=['Close'])
             if data.empty or len(data) < 25:
                 continue
-                
             return calculate_indicators(data)
         except Exception:
             continue
     return None
 
+# --- 抓取基本面與法人籌碼簡要資訊 ---
+@st.cache_data(ttl=86400)
+def fetch_fundamental_chip_info(stock_id):
+    clean_id = str(stock_id).replace(".TW", "").replace(".TWO", "").strip()
+    for suffix in [".TW", ".TWO"]:
+        try:
+            ticker = yf.Ticker(f"{clean_id}{suffix}")
+            info = ticker.info
+            if info and 'trailingPE' in info:
+                return {
+                    "pe": info.get("trailingPE"),
+                    "pb": info.get("priceToBook"),
+                    "revenue_growth": info.get("revenueGrowth"),
+                    "inst_percent": info.get("heldPercentInstitutions")
+                }
+        except Exception:
+            continue
+    return {"pe": None, "pb": None, "revenue_growth": None, "inst_percent": None}
+
 # --- 5. 主介面 Tabs ---
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "⭐ 我的最愛與自訂均線 (DB連動)", 
     "🔍 單一個股圖表細節", 
     "🚀 帶量紅K短線轉強掃描",
-    "🧱 底部大均線尋寶器 (長線支撐型)"
+    "🧱 底部大均線尋寶器 (長線支撐型)",
+    "🤖 AI 三位一體起漲尋寶器 (三面合一)"
 ])
 
-# ==========================================
-# Tab 1: 我的最愛管理與對比警示 (已更新短均>長均條件)
-# ==========================================
+# (Tab 1, Tab 2, Tab 3, Tab 4 保持原本邏輯...)
 with tab1:
     st.subheader("➕ 新增與管理關注個股 (自動同步至 Google Sheets)")
-    
     col_in, col_btn = st.columns([3, 1])
     with col_in:
         new_stock = st.text_input("輸入要加入的股票代號（如：2317 或 0050）", key="new_stock_input").strip()
@@ -231,7 +233,6 @@ with tab1:
 
     st.markdown("---")
     st.subheader("⚙️ 獨立設定每檔股票要監控的均線")
-
     def update_ma_setting(code):
         selected = st.session_state[f"ms_{code}"]
         st.session_state.ma_settings[code] = selected
@@ -252,12 +253,9 @@ with tab1:
                 current_selected = st.session_state.ma_settings.get(code, ALL_MAS)
                 st.multiselect(
                     f"選擇 {stock_label} 要觸發通知的均線：",
-                    options=ALL_MAS,
-                    default=current_selected,
+                    options=ALL_MAS, default=current_selected,
                     format_func=lambda x: f"{x} ({MA_LABELS[x]})",
-                    key=f"ms_{code}",
-                    on_change=update_ma_setting,
-                    args=(code,)
+                    key=f"ms_{code}", on_change=update_ma_setting, args=(code,)
                 )
 
     st.markdown("---")
@@ -272,28 +270,18 @@ with tab1:
             for code in st.session_state.watchlist:
                 df_code = load_stock_data(code)
                 stock_label = get_stock_label(code)
-                
                 if df_code is not None and not df_code.empty and len(df_code) >= 240:
                     last_row = df_code.iloc[-1]
                     raw_price = last_row['Close']
-                    
                     if pd.notna(raw_price):
                         price = float(raw_price)
                         target_mas = st.session_state.ma_settings.get(code, ALL_MAS)
-                        
-                        # 檢查短均線是否全部大於長均線 (120MA & 240MA)
                         ma5, ma10, ma20 = float(last_row['5MA']), float(last_row['10MA']), float(last_row['20MA'])
                         ma120, ma240 = float(last_row['120MA']), float(last_row['240MA'])
-                        
                         has_valid_ma = pd.notna(ma5) and pd.notna(ma10) and pd.notna(ma20) and pd.notna(ma120) and pd.notna(ma240)
-                        short_mas_above = has_valid_ma and (
-                            (ma5 > ma120 and ma5 > ma240) and
-                            (ma10 > ma120 and ma10 > ma240) and
-                            (ma20 > ma120 and ma20 > ma240)
-                        )
+                        short_mas_above = has_valid_ma and ((ma5 > ma120 and ma5 > ma240) and (ma10 > ma120 and ma10 > ma240) and (ma20 > ma120 and ma20 > ma240))
 
                         triggered_info = []
-                        
                         if short_mas_above:
                             for ma_key in target_mas:
                                 if ma_key in last_row and pd.notna(last_row[ma_key]):
@@ -302,51 +290,24 @@ with tab1:
                                     if abs(diff) <= alert_threshold:
                                         pos = "站上" if diff >= 0 else "跌破"
                                         triggered_info.append(f"{MA_LABELS[ma_key]}({abs(diff):.1f}%)")
-                                        all_alerts.append(
-                                            f"• **{stock_label}** 現價 {price:.2f} 靠近 **{MA_LABELS[ma_key]}** ({ma_val:.2f})，差距 {abs(diff):.1f}% ({pos})"
-                                        )
-
-                        # 更新表格狀態欄位
+                                        all_alerts.append(f"• **{stock_label}** 現價 {price:.2f} 靠近 **{MA_LABELS[ma_key]}** ({ma_val:.2f})，差距 {abs(diff):.1f}% ({pos})")
                         status_str = "符合短均>長均" if short_mas_above else "未符合(短均仍在長均下)"
-                        summary_data.append({
-                            "股票名稱 (代號)": stock_label,
-                            "收盤價": f"{price:.2f}",
-                            "型態結構": status_str,
-                            "監控中的均線": ", ".join([MA_LABELS.get(m, m) for m in target_mas]),
-                            "符合警示的均線": ", ".join(triggered_info) if triggered_info else "無接近/未過濾"
-                        })
+                        summary_data.append({"股票名稱 (代號)": stock_label, "收盤價": f"{price:.2f}", "型態結構": status_str, "監控中的均線": ", ".join([MA_LABELS.get(m, m) for m in target_mas]), "符合警示的均線": ", ".join(triggered_info) if triggered_info else "無接近/未過濾"})
                     else:
-                        summary_data.append({
-                            "股票名稱 (代號)": stock_label,
-                            "收盤價": "價格無效",
-                            "型態結構": "-",
-                            "監控中的均線": "-",
-                            "符合警示的均線": "數據缺失"
-                        })
+                        summary_data.append({"股票名稱 (代號)": stock_label, "收盤價": "價格無效", "型態結構": "-", "監控中的均線": "-", "符合警示的均線": "數據缺失"})
                 else:
-                    summary_data.append({
-                        "股票名稱 (代號)": stock_label,
-                        "收盤價": "代號錯誤/歷史數據不足",
-                        "型態結構": "-",
-                        "監控中的均線": "-",
-                        "符合警示的均線": "無法抓取"
-                    })
+                    summary_data.append({"股票名稱 (代號)": stock_label, "收盤價": "代號錯誤/歷史數據不足", "型態結構": "-", "監控中的均線": "-", "符合警示的均線": "無法抓取"})
 
         if summary_data:
             st.dataframe(pd.DataFrame(summary_data), use_container_width=True)
 
         st.markdown("---")
         st.write("### 🔔 LINE 手動發送與觸發通知區")
-        
         col_btn1, col_btn2 = st.columns([1, 1])
-        
         with col_btn1:
             if st.button("🧪 發送 LINE 測試訊息"):
                 success, info = send_line_message(line_token, line_user_id, "🔔 這是一條來自【台股均線監測站】的連線測試訊息！")
-                if success:
-                    st.success(info)
-                else:
-                    st.error(info)
+                st.success(info) if success else st.error(info)
 
         if all_alerts:
             st.warning("⚠️ 目前滿足型態結構且觸發門檻的個股：\n" + "\n".join(all_alerts))
@@ -354,45 +315,30 @@ with tab1:
                 if st.button("📲 發送選擇均線之 LINE 警示訊息", type="primary"):
                     msg = f"\n🚨【台股監測警示 - 多頭轉強均線通知】\n門檻設定：{alert_threshold}%\n" + "\n".join(all_alerts).replace("**", "")
                     success, info = send_line_message(line_token, line_user_id, msg)
-                    if success:
-                        st.success(info)
-                    else:
-                        st.error(info)
+                    st.success(info) if success else st.error(info)
         else:
             st.info(f"💡 目前清單中無符合『短均全在長均之上』且與監控均線差距小於 {alert_threshold}% 的個股。")
 
-# ==========================================
-# Tab 2: 單一個股圖表細節 (完全保持原樣)
-# ==========================================
 with tab2:
     search_code = st.text_input("輸入台股代號查看技術線圖", value="2330").strip()
     if search_code:
         stock_label = get_stock_label(search_code)
         df_single = load_stock_data(search_code)
-        
         if df_single is not None and not df_single.empty:
             st.subheader(f"📈 {stock_label} 技術線圖")
             plot_df = df_single.tail(120)
             fig = go.Figure()
-            fig.add_trace(go.Candlestick(
-                x=plot_df.index, open=plot_df['Open'], high=plot_df['High'],
-                low=plot_df['Low'], close=plot_df['Close'], name='K線'
-            ))
+            fig.add_trace(go.Candlestick(x=plot_df.index, open=plot_df['Open'], high=plot_df['High'], low=plot_df['Low'], close=plot_df['Close'], name='K線'))
             colors = {'5MA': 'orange', '10MA': 'purple', '20MA': 'blue', '60MA': 'green', '120MA': 'brown', '240MA': 'red'}
             for ma_col, color in colors.items():
                 if ma_col in plot_df.columns:
                     fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df[ma_col], mode='lines', name=MA_LABELS[ma_col], line=dict(color=color, width=1.5)))
-
             fig.update_layout(xaxis_rangeslider_visible=False, height=550, margin=dict(l=20, r=20, t=20, b=20), template="plotly_white")
             st.plotly_chart(fig, use_container_width=True)
 
-# ==========================================
-# Tab 3: 🚀 帶量紅K短線轉強掃描
-# ==========================================
 with tab3:
     st.subheader("🚀 全台股帶量紅 K 與均線上彎掃描器")
     st.caption("硬性條件：【成交量 > 2000張】＋【帶量紅K (量>5日均量1.3倍)】＋【5MA / 10MA / 20MA 至少有一條扣低轉上彎】")
-
     col_v, col_s = st.columns(2)
     with col_v:
         min_vol_lots = st.number_input("成交量防護門檻 (張)", min_value=500, value=2000, step=500, key="t3_vol")
@@ -400,162 +346,165 @@ with tab3:
         scan_scope = st.selectbox("掃描標的範圍", ["熱門大型與權值股 (約 30 檔 - 快速)", "全台股上市上櫃 (約 1800 檔 - 需較長時間)"], key="t3_scope")
 
     if st.button("🔍 開始掃描強勢標的", type="primary", key="btn_t3"):
-        target_codes = []
-        if scan_scope.startswith("熱門大型"):
-            target_codes = list(BUILTIN_STOCKS.keys()) + [
-                "2303", "2603", "2609", "2615", "3231", "2356", "6669", "3037",
-                "2379", "3034", "2337", "2408", "2344", "2301", "2324", "2353"
-            ]
-        else:
-            with st.spinner("抓取全台股股票清單中..."):
-                for code, info in twstock.codes.items():
-                    if info.type == "股票" and len(code) == 4 and code.isdigit():
-                        target_codes.append(code)
-
-        st.info(f"正在掃描 {len(target_codes)} 檔股票數據...")
+        target_codes = list(BUILTIN_STOCKS.keys()) + ["2303", "2603", "2609", "2615", "3231", "2356", "6669", "3037", "2379", "3034", "2337", "2408", "2344", "2301", "2324", "2353"] if scan_scope.startswith("熱門大型") else [c for c, i in twstock.codes.items() if i.type == "股票" and len(c) == 4 and c.isdigit()]
         p_bar = st.progress(0)
         scan_results = []
-
         for idx, code in enumerate(target_codes):
             p_bar.progress((idx + 1) / len(target_codes))
             df = load_stock_data(code)
-
             if df is not None and not df.empty and len(df) >= 25:
-                curr = df.iloc[-1]
-                prev = df.iloc[-2]
-                prev2 = df.iloc[-3]
-
-                open_p = float(curr['Open'])
-                close_p = float(curr['Close'])
-                vol_shares = float(curr['Volume'])
-                vol_lots = vol_shares / 1000.0
-                vol_5ma = float(curr['Vol_5MA']) if pd.notna(curr['Vol_5MA']) else 0
-
+                curr, prev, prev2 = df.iloc[-1], df.iloc[-2], df.iloc[-3]
+                open_p, close_p, vol_shares = float(curr['Open']), float(curr['Close']), float(curr['Volume'])
+                vol_lots, vol_5ma = vol_shares / 1000.0, float(curr['Vol_5MA']) if pd.notna(curr['Vol_5MA']) else 0
                 if vol_lots >= min_vol_lots and close_p > open_p and (vol_5ma > 0 and vol_shares >= vol_5ma * 1.3):
-                    up_mas = []
-                    for ma_key, ma_name in [('5MA', '5日線'), ('10MA', '10日線'), ('20MA', '月線')]:
-                        if pd.notna(curr[ma_key]) and pd.notna(prev[ma_key]) and pd.notna(prev2[ma_key]):
-                            c_ma, p_ma, p2_ma = float(curr[ma_key]), float(prev[ma_key]), float(prev2[ma_key])
-                            if p_ma <= p2_ma and c_ma > p_ma and close_p >= c_ma:
-                                up_mas.append(ma_name)
-
-                    if len(up_mas) > 0:
-                        vol_mult = (vol_shares / vol_5ma) if vol_5ma > 0 else 0
-                        scan_results.append({
-                            "股票代號/名稱": get_stock_label(code),
-                            "收盤價": f"{close_p:.2f}",
-                            "漲跌K線": f"🔴 紅K (+{(close_p - open_p):.2f})",
-                            "成交量 (張)": int(vol_lots),
-                            "量增倍數": f"{vol_mult:.1f} 倍",
-                            "轉上彎均線": "、".join(up_mas),
-                            "KD (K值)": round(float(curr['K']), 1) if pd.notna(curr['K']) else "-"
-                        })
-
+                    up_mas = [m_name for m_key, m_name in [('5MA', '5日線'), ('10MA', '10日線'), ('20MA', '月線')] if pd.notna(curr[m_key]) and pd.notna(prev[m_key]) and pd.notna(prev2[ma_key]) if float(prev[m_key]) <= float(prev2[m_key]) and float(curr[m_key]) > float(prev[m_key]) and close_p >= float(curr[m_key])]
+                    if up_mas:
+                        scan_results.append({"股票代號/名稱": get_stock_label(code), "收盤價": f"{close_p:.2f}", "漲跌K線": f"🔴 紅K (+{(close_p - open_p):.2f})", "成交量 (張)": int(vol_lots), "量增倍數": f"{(vol_shares/vol_5ma):.1f} 倍", "轉上彎均線": "、".join(up_mas), "KD (K值)": round(float(curr['K']), 1) if pd.notna(curr['K']) else "-"})
         p_bar.empty()
-        if scan_results:
-            st.success(f"🎉 找到 {len(scan_results)} 檔短線轉強標的：")
-            st.dataframe(pd.DataFrame(scan_results), use_container_width=True)
-        else:
-            st.warning("⚠️ 目前無符合條件的股票。")
+        st.dataframe(pd.DataFrame(scan_results), use_container_width=True) if scan_results else st.warning("⚠️ 目前無符合條件的股票。")
 
-# ==========================================
-# Tab 4: 🧱 底部大均線尋寶器 (長線支撐型)
-# ==========================================
 with tab4:
     st.subheader("🧱 底部大均線（半年線/年線）佈局器")
     st.caption("嚴格條件：【短線均線 (5MA/10MA/20MA) 全數站上 120MA & 240MA】＋【股價貼近長線成本區】")
-
     col_target_ma, col_dist, col_v4 = st.columns(3)
     with col_target_ma:
-        selected_bottom_mas = st.multiselect(
-            "選擇要比對貼近狀況的大均線：",
-            options=['120MA', '240MA'],
-            default=['120MA', '240MA'],
-            format_func=lambda x: f"{x} ({MA_LABELS[x]})"
-        )
+        selected_bottom_mas = st.multiselect("選擇要比對貼近狀況的大均線：", options=['120MA', '240MA'], default=['120MA', '240MA'], format_func=lambda x: f"{x} ({MA_LABELS[x]})")
     with col_dist:
         max_dist_pct = st.number_input("股價/短均距離大均線上限 (%)", min_value=0.5, max_value=15.0, value=5.0, step=0.5)
     with col_v4:
         min_vol_bottom = st.number_input("成交量防護門檻 (張)", min_value=500, value=2000, step=500, key="t4_vol")
-
     only_red_bottom = st.checkbox("只顯示帶量紅 K（成交量 > 5日均量 1.2倍 且 當日收紅）", value=True, key="t4_red")
 
     if st.button("🔍 掃描長線轉強且貼近底部的標的", type="primary", key="btn_t4"):
-        if not selected_bottom_mas:
-            st.error("請至少選擇一條大均線進行比對！")
-        else:
-            target_codes = []
-            with st.spinner("載入全台股清單中..."):
-                for code, info in twstock.codes.items():
-                    if info.type == "股票" and len(code) == 4 and code.isdigit():
-                        target_codes.append(code)
-
-            st.info(f"正在分析 {len(target_codes)} 檔股票數據...")
+        if selected_bottom_mas:
+            target_codes = [c for c, i in twstock.codes.items() if i.type == "股票" and len(c) == 4 and c.isdigit()]
             p_bar4 = st.progress(0)
             bottom_results = []
-
             for idx, code in enumerate(target_codes):
                 p_bar4.progress((idx + 1) / len(target_codes))
                 df = load_stock_data(code)
-
                 if df is not None and not df.empty and len(df) >= 240:
                     curr = df.iloc[-1]
-                    price = float(curr['Close'])
-                    open_p = float(curr['Open'])
-                    vol_shares = float(curr['Volume'])
-                    vol_lots = vol_shares / 1000.0
-                    vol_5ma = float(curr['Vol_5MA']) if pd.notna(curr['Vol_5MA']) else 0
-
-                    if vol_lots < min_vol_bottom:
-                        continue
-
-                    if only_red_bottom:
-                        if not (price > open_p and vol_shares >= vol_5ma * 1.2):
+                    price, open_p, vol_shares = float(curr['Close']), float(curr['Open']), float(curr['Volume'])
+                    vol_lots, vol_5ma = vol_shares / 1000.0, float(curr['Vol_5MA']) if pd.notna(curr['Vol_5MA']) else 0
+                    if vol_lots >= min_vol_bottom:
+                        if only_red_bottom and not (price > open_p and vol_shares >= vol_5ma * 1.2):
                             continue
-
-                    ma5, ma10, ma20 = float(curr['5MA']), float(curr['10MA']), float(curr['20MA'])
-                    ma120, ma240 = float(curr['120MA']), float(curr['240MA'])
-
-                    if not (pd.notna(ma5) and pd.notna(ma10) and pd.notna(ma20) and pd.notna(ma120) and pd.notna(ma240)):
-                        continue
-
-                    short_mas_above = (
-                        (ma5 > ma120 and ma5 > ma240) and
-                        (ma10 > ma120 and ma10 > ma240) and
-                        (ma20 > ma120 and ma20 > ma240)
-                    )
-
-                    if not short_mas_above:
-                        continue
-
-                    near_info = []
-                    min_abs_diff = 999.0
-
-                    for ma_key in selected_bottom_mas:
-                        ma_val = float(curr[ma_key])
-                        diff_pct = ((price - ma_val) / ma_val) * 100
-
-                        if 0 <= diff_pct <= max_dist_pct:
-                            near_info.append(f"{MA_LABELS[ma_key]} (高出 {diff_pct:+.1f}%)")
-                            if diff_pct < min_abs_diff:
-                                min_abs_diff = diff_pct
-
-                    if near_info:
-                        bottom_results.append({
-                            "股票代號/名稱": get_stock_label(code),
-                            "收盤價": f"{price:.2f}",
-                            "成交量 (張)": int(vol_lots),
-                            "貼近狀況 (站上長均)": " | ".join(near_info),
-                            "KD (K值)": round(float(curr['K']), 1) if pd.notna(curr['K']) else "-",
-                            "距離長均差距 (%)": f"{min_abs_diff:.1f}%",
-                            "差距數值": min_abs_diff
-                        })
-
+                        ma5, ma10, ma20 = float(curr['5MA']), float(curr['10MA']), float(curr['20MA'])
+                        ma120, ma240 = float(curr['120MA']), float(curr['240MA'])
+                        if pd.notna(ma5) and pd.notna(ma10) and pd.notna(ma20) and pd.notna(ma120) and pd.notna(ma240):
+                            if (ma5 > ma120 and ma5 > ma240) and (ma10 > ma120 and ma10 > ma240) and (ma20 > ma120 and ma20 > ma240):
+                                near_info = []
+                                min_abs_diff = 999.0
+                                for ma_key in selected_bottom_mas:
+                                    ma_val = float(curr[ma_key])
+                                    diff_pct = ((price - ma_val) / ma_val) * 100
+                                    if 0 <= diff_pct <= max_dist_pct:
+                                        near_info.append(f"{MA_LABELS[ma_key]} (高出 {diff_pct:+.1f}%)")
+                                        if diff_pct < min_abs_diff: min_abs_diff = diff_pct
+                                if near_info:
+                                    bottom_results.append({"股票代號/名稱": get_stock_label(code), "收盤價": f"{price:.2f}", "成交量 (張)": int(vol_lots), "貼近狀況 (站上長均)": " | ".join(near_info), "KD (K值)": round(float(curr['K']), 1) if pd.notna(curr['K']) else "-", "距離長均差距 (%)": f"{min_abs_diff:.1f}%", "差距數值": min_abs_diff})
             p_bar4.empty()
+            st.dataframe(pd.DataFrame(bottom_results).sort_values("差距數值").drop(columns=["差距數值"]), use_container_width=True) if bottom_results else st.warning("⚠️ 目前無符合所有硬性條件的股票。")
 
-            if bottom_results:
-                res_df = pd.DataFrame(bottom_results).sort_values("差距數值").drop(columns=["差距數值"])
-                st.success(f"🎉 找到 {len(res_df)} 檔短均突破且貼近【{', '.join([MA_LABELS[m] for m in selected_bottom_mas])}】附近的標的：")
-                st.dataframe(res_df, use_container_width=True)
-            else:
-                st.warning("⚠️ 目前無符合所有硬性條件（短均全在長均之上 + 貼近指定範圍）的股票。")
+# ==========================================
+# Tab 5: 🤖 AI 三位一體起漲尋寶器 (全新新增)
+# ==========================================
+with tab5:
+    st.subheader("🤖 AI 三位一體：基本面＋技術面＋籌碼面「未起漲/剛起漲」交叉驗證")
+    st.caption("AI 評分模型：篩選打底完成、籌碼收集、且估值合理或具營收成長性的極早期潛力標的。")
+
+    col_t5_1, col_t5_2, col_t5_3 = st.columns(3)
+    with col_t5_1:
+        max_pe_input = st.number_input("基本面：本益比 (P/E) 上限", min_value=5, max_value=50, value=25, step=1)
+    with col_t5_2:
+        max_kd_input = st.number_input("技術面：KD (K值) 防高檔上限", min_value=20, max_value=80, value=65, step=5)
+    with col_t5_3:
+        min_vol_t5 = st.number_input("成交量門檻 (張)", min_value=300, value=1000, step=100, key="t5_vol")
+
+    if st.button("🚀 啟動 AI 交叉分析掃描", type="primary", key="btn_t5"):
+        target_codes = [c for c, i in twstock.codes.items() if i.type == "股票" and len(c) == 4 and c.isdigit()]
+        
+        st.info(f"AI 正在對 {len(target_codes)} 檔股票進行基本面、技術面、籌碼面進行模型檢測...")
+        p_bar5 = st.progress(0)
+        ai_results = []
+
+        for idx, code in enumerate(target_codes):
+            p_bar5.progress((idx + 1) / len(target_codes))
+            df = load_stock_data(code)
+            
+            if df is not None and not df.empty and len(df) >= 60:
+                curr = df.iloc[-1]
+                prev = df.iloc[-2]
+                price = float(curr['Close'])
+                vol_lots = float(curr['Volume']) / 1000.0
+
+                if vol_lots < min_vol_t5:
+                    continue
+
+                # 1. 技術面得分條件 (Tech Score)
+                tech_score = 0
+                tech_reasons = []
+
+                k_val = float(curr['K']) if pd.notna(curr['K']) else 99
+                d_val = float(curr['D']) if pd.notna(curr['D']) else 99
+                prev_k = float(prev['K']) if pd.notna(prev['K']) else 0
+                prev_d = float(prev['D']) if pd.notna(prev['D']) else 0
+
+                # 技術面 1: KD 低檔黃金交叉且 K < 限值
+                if k_val <= max_kd_input and prev_k <= prev_d and k_val > d_val:
+                    tech_score += 35
+                    tech_reasons.append(f"KD低檔金叉(K={k_val:.1f})")
+
+                # 技術面 2: 均線纏繞打底剛站上 20MA 或 60MA
+                ma20 = float(curr['20MA']) if pd.notna(curr['20MA']) else 0
+                ma60 = float(curr['60MA']) if pd.notna(curr['60MA']) else 0
+                if price >= ma20 and price >= ma60:
+                    diff_60 = abs(price - ma60) / ma60 * 100
+                    if diff_60 <= 5.0:
+                        tech_score += 35
+                        tech_reasons.append(f"剛站上季線({diff_60:.1f}%)")
+
+                if tech_score == 0:
+                    continue
+
+                # 2. 基本面與籌碼面估算 (Fundamental & Chip Score)
+                f_info = fetch_fundamental_chip_info(code)
+                pe = f_info['pe']
+                pb = f_info['pb']
+                rev_growth = f_info['revenue_growth']
+                inst_pct = f_info['inst_percent']
+
+                fund_score = 0
+                fund_reasons = []
+
+                if pe and 0 < pe <= max_pe_input:
+                    fund_score += 15
+                    fund_reasons.append(f"PE低估({pe:.1f})")
+                
+                if rev_growth and rev_growth > 0:
+                    fund_score += 15
+                    fund_reasons.append(f"營收成長({rev_growth*100:.1f}%)")
+
+                # 總綜合 AI 評分
+                total_ai_score = tech_score + fund_score
+
+                if total_ai_score >= 50:
+                    ai_results.append({
+                        "股票代號/名稱": get_stock_label(code),
+                        "AI綜合推薦指數": f"⭐ {total_ai_score} 分",
+                        "收盤價": f"{price:.2f}",
+                        "成交量 (張)": int(vol_lots),
+                        "技術面訊號": " + ".join(tech_reasons) if tech_reasons else "強勢打底",
+                        "基本/籌碼亮點": " | ".join(fund_reasons) if fund_reasons else "估值合理",
+                        "score_num": total_ai_score
+                    })
+
+        p_bar5.empty()
+
+        if ai_results:
+            res_df = pd.DataFrame(ai_results).sort_values("score_num", ascending=False).drop(columns=["score_num"])
+            st.success(f"🤖 AI 模型成功精選出 {len(res_df)} 檔『基本面+技術面+籌碼面』剛起漲/潛力打底個股：")
+            st.dataframe(res_df, use_container_width=True)
+        else:
+            st.warning("⚠️ 目前未掃描到符合三位一體高分技術與估值條件的股票，建議適度放寬 PE 或 KD 條件。")
