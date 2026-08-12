@@ -94,7 +94,7 @@ def save_settings_to_gsheets(watchlist, ma_settings, enable_kd, max_k):
         st.error(f"❌ 寫入 Google Sheets 失敗: {e}")
         return False
 
-# --- 2. 狀態初始化保護機制 ---
+# --- 2. 狀態初始化機制 ---
 if "watchlist" not in st.session_state or "enable_kd_filter" not in st.session_state:
     db_watchlist, db_ma_settings, db_enable_kd, db_max_k = load_settings_from_gsheets()
     st.session_state.watchlist = db_watchlist
@@ -105,7 +105,7 @@ if "watchlist" not in st.session_state or "enable_kd_filter" not in st.session_s
 default_token = st.secrets.get("LINE_CHANNEL_ACCESS_TOKEN", "") if "LINE_CHANNEL_ACCESS_TOKEN" in st.secrets else st.session_state.get("line_token", "")
 default_user_id = st.secrets.get("LINE_USER_ID", "") if "LINE_USER_ID" in st.secrets else st.session_state.get("line_user_id", "")
 
-# --- 3. 側邊欄設定與雲端異步同步函數 ---
+# --- 3. 側邊欄設定 ---
 def on_kd_setting_change():
     st.session_state.enable_kd_filter = st.session_state.input_enable_kd
     st.session_state.max_k_value = st.session_state.input_max_k
@@ -247,19 +247,16 @@ def load_stock_data(stock_id):
             continue
     return None
 
-# --- TWSE / TPEx 法人籌碼 API 抓取工具 ---
+# --- TWSE / TPEx 三大法人的官方 API 資料抓取 ---
 @st.cache_data(ttl=3600)
 def fetch_chip_data_twse_tpex():
-    """抓取最新一天的上市與上櫃三大法人買賣超金額資料"""
-    chip_dict = {} # {code: {'foreign_buy': float, 'sitc_buy': float, 'sitc_3d_buy': bool}}
+    chip_dict = {}
     today = datetime.now()
     
-    # 嘗試向前尋找最近 5 個日曆天內的交易日資料
     for day_offset in range(5):
         target_date = today - timedelta(days=day_offset)
         date_str_twse = target_date.strftime("%Y%m%d")
         
-        # 1. 抓取 TWSE (上市)
         twse_url = f"https://www.twse.com.tw/rwd/zh/fund/T86?response=json&date={date_str_twse}&selectType=ALL"
         try:
             r = requests.get(twse_url, timeout=5)
@@ -269,11 +266,8 @@ def fetch_chip_data_twse_tpex():
                     for row in data["data"]:
                         code = row[0].strip()
                         if len(code) == 4 and code.isdigit():
-                            # 單位轉為元
-                            foreign_net = float(row[7].replace(",", "")) * float(row[10].replace(",", "") if len(row)>10 else 1) rescue_val(row)
-                            foreign_net_val = float(row[7].replace(",", "")) # 張數
-                            sitc_net_val = float(row[10].replace(",", ""))    # 投信張數
-                            # 估算買超金額 (張數 * 估算價) -> 將在主流程配合收盤價精算
+                            foreign_net_val = float(row[7].replace(",", "")) if len(row) > 7 else 0.0
+                            sitc_net_val = float(row[10].replace(",", "")) if len(row) > 10 else 0.0
                             chip_dict[code] = {
                                 "foreign_shares": foreign_net_val,
                                 "sitc_shares": sitc_net_val,
@@ -291,11 +285,11 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "🔍 單一個股圖表細節", 
     "🚀 帶量紅K短線轉強掃描",
     "🧱 底部大均線尋寶器 (長線支撐型)",
-    "🤖 AI 波段翻多確認與多頭型態掃描",
-    "🔥 籌碼與爆量突破篩選器"
+    "🤖 AI 波段翻多與多頭型態掃描",
+    "🔥 籌碼、爆量與波段翻多複合篩選器"
 ])
 
-# Tab 1 ~ Tab 5 保留原樣 ...
+# Tab 1 ~ Tab 5
 with tab1:
     st.subheader("➕ 新增與管理關注個股 (自動同步至 Google Sheets)")
     col_in, col_btn = st.columns([3, 1])
@@ -542,23 +536,6 @@ with tab5:
     st.subheader("🤖 台股波段「正式翻多」與多頭階段掃描器")
     st.caption("依據 6 大核心條件判斷波段翻多訊號，並自動標示波段多頭階段與顯示 KD / MACD 精準數據。")
 
-    with st.expander("📌 **查看 6 大核心翻多條件與階段定義**", expanded=False):
-        st.markdown("""
-        **【6 大正式翻多條件】**
-        1. **股價 > 60MA** (站上季線)
-        2. **5MA > 10MA** (短均線金叉)
-        3. **MACD DIF 黃金交叉** (當日 DIF 向上突破 DEA)
-        4. **MACD 柱狀體由負轉正** (Oscillator 翻紅)
-        5. **DIF > 0** (站上零軸強勢區)
-        6. **成交量 > 20日均量** (量能放大)
-
-        **【多頭階段分類】**
-        * 🔥 **正式翻多**：同時滿足上述全部 6 個條件。
-        * 🟡 **提前佈局**：MACD DIF 黃金交叉 ＋ 柱狀體翻紅。
-        * 🟢 **確認買進**：DIF > 0 ＋ 股價站上 60MA ＋ 成交量 > 20日均量。
-        * 🔵 **強勢多頭**：5MA > 10MA > 20MA > 60MA 多頭排列，且 MACD 柱狀體持續向上。
-        """)
-
     col_t5_1, col_t5_2 = st.columns(2)
     with col_t5_1:
         min_vol_t5 = st.number_input("成交量最低過濾門檻 (張)", min_value=300, value=1000, step=100, key="t5_vol_filter")
@@ -577,7 +554,6 @@ with tab5:
 
     if st.button("🚀 啟動台股波段翻多一鍵掃描", type="primary", key="btn_t5"):
         target_codes = [c for c, i in twstock.codes.items() if i.type == "股票" and len(c) == 4 and c.isdigit()]
-        st.info(f"正在對全台股 {len(target_codes)} 檔股票進行 MACD 與均線多頭型態分析...")
         p_bar5 = st.progress(0)
         scan_results = []
 
@@ -656,31 +632,44 @@ with tab5:
             st.warning("⚠️ 目前市場中無符合所選階段條件的股票。")
 
 # ==========================================
-# Tab 6: 籌碼與爆量突破篩選器 (全新頁籤)
+# Tab 6: 籌碼、爆量與波段翻多複合篩選器 (修正版)
 # ==========================================
 with tab6:
-    st.subheader("🔥 籌碼聚焦與爆量突破篩選器")
-    st.caption("針對『大金額大成交量』、『投信籌碼卡位』與『土洋同買』進行全台股快篩。")
+    st.subheader("🔥 全台股籌碼、爆量突破與 6 大波段翻多篩選器")
+    st.caption("支援 4 大核心策略快篩，精準計算成交金額（＞5 億）、法人籌碼數據與技術面指標。")
 
     strat_option = st.radio(
-        "選擇要執行的策略條件：",
+        "選擇要執行的策略篩選條件：",
         [
-            "策略 1：成交金額 > 5 億 ＋ 成交量創 10 日新高 (爆量強勢)",
-            "策略 2：成交金額 > 5 億 ＋ 投信 3 日內買超 ＋ 40日高價乖離介於 -2% ~ +2% (投信卡位突破)",
-            "策略 3：土洋同買 (外資買超 > 5000萬 且 投信買超 > 2000萬) ＋ 成交金額 > 5 億"
+            "指標 1：成交金額 > 5 億 ＋ 成交量創 10 日新高 (爆量突破)",
+            "指標 2：成交金額 > 5 億 ＋ 投信 3 日內買超 ＋ 40日高價乖離介於 -2% ~ +2% (投信卡位突破)",
+            "指標 3：土洋同買 (外資買超 > 5000萬 且 投信買超 > 2000萬) ＋ 成交金額 > 5 億",
+            "指標 4：6 大正式翻多條件 ＋ 成交金額 > 5 億 (大資金波段起漲)"
         ],
         index=0,
         key="t6_strat_choice"
     )
 
-    if st.button("⚡ 啟動全台股籌碼與爆量快篩", type="primary", key="btn_t6"):
+    with st.expander("📌 **點此展開查看『指標 4：6 大正式翻多條件』詳細說明**"):
+        st.markdown("""
+        **【6 大正式翻多硬性指標】**
+        1. **股價 > 60MA**：站上季線，中期趨勢保護。
+        2. **5MA > 10MA**：短線均線黃金交叉。
+        3. **MACD DIF 黃金交叉**：當日 DIF 向上突破 DEA 訊號。
+        4. **MACD 柱狀體由負轉正**：Oscillator 翻紅轉強。
+        5. **DIF > 0**：站上零軸多頭強勢區。
+        6. **成交量 > 20日均量**：量能明顯放大。
+        * **硬性加算門檻**：當日成交金額必須 $> 5$ 億台幣。
+        """)
+
+    if st.button("⚡ 啟動全台股籌碼與指標快篩", type="primary", key="btn_t6"):
         target_codes = [c for c, i in twstock.codes.items() if i.type == "股票" and len(c) == 4 and c.isdigit()]
         
-        # 預先抓取三大法人公開籌碼資料
-        with st.spinner("正在向證交所同步最新三大法人買賣超資料..."):
+        # 預先同步證交所公開資料
+        with st.spinner("正在向證交所同步最新三大法人籌碼資料..."):
             chip_info = fetch_chip_data_twse_tpex()
 
-        st.info(f"正在分析全台股 {len(target_codes)} 檔股票之成交金額、高點距離與法人籌碼數據...")
+        st.info(f"正在對全台股 {len(target_codes)} 檔股票進行成交金額、法人籌碼與技術面即時運算...")
         p_bar6 = st.progress(0)
         t6_results = []
 
@@ -688,26 +677,21 @@ with tab6:
             p_bar6.progress((idx + 1) / len(target_codes))
             df = load_stock_data(code)
             
-            if df is not None and not df.empty and len(df) >= 40:
-                curr = df.iloc[-1]
+            if df is not None and not df.empty and len(df) >= 60:
+                curr, prev = df.iloc[-1], df.iloc[-2]
                 price = float(curr['Close'])
                 vol_shares = float(curr['Volume'])
                 vol_lots = vol_shares / 1000.0
                 
-                # 成交金額 (約為 收盤價 * 當日成交股數，單位：億)
+                # 成交金額 (收盤價 * 當日成交股數，單位：億台幣)
                 turnover_amount_yi = (price * vol_shares) / 1_0000_0000.0
 
-                # 基本防護：成交金額至少須達到約 2 億才會進行深度比對，節省效能
-                if turnover_amount_yi < 2.0:
-                    continue
-
                 # ----------------------------------------------------
-                # 策略 1: 成交金額 > 5億 且 成交量創 10 日新高
+                # 指標 1: 成交金額 > 5億 ＋ 成交量創 10 日新高
                 # ----------------------------------------------------
-                if "策略 1" in strat_option:
+                if "指標 1" in strat_option:
                     if turnover_amount_yi > 5.0:
                         last_10_vols = df['Volume'].tail(10).tolist()
-                        # 當日成交量高於前 9 日最大值
                         if len(last_10_vols) >= 10 and vol_shares >= max(last_10_vols):
                             t6_results.append({
                                 "股票代號/名稱": get_stock_label(code),
@@ -719,22 +703,16 @@ with tab6:
                             })
 
                 # ----------------------------------------------------
-                # 策略 2: 成交金額 > 5億 ＋ 投信3日內買超 ＋ 40日高價乖離介於 -2% ~ +2%
+                # 指標 2: 成交金額 > 5億 ＋ 投信3日內買超 ＋ 40日高價乖離 -2% ~ +2%
                 # ----------------------------------------------------
-                elif "策略 2" in strat_option:
+                elif "指標 2" in strat_option:
                     if turnover_amount_yi > 5.0:
-                        # 計算近 40 日最高價
                         high_40 = df['High'].tail(40).max()
                         if pd.notna(high_40) and high_40 > 0:
-                            # 乖離率 = (現價 - 40日高價) / 40日高價 * 100
                             bias_40 = ((price - high_40) / high_40) * 100.0
-                            
                             if -2.0 <= bias_40 <= 2.0:
-                                # 比對投信籌碼（近3日買超或當日買超張數 > 0）
                                 c_data = chip_info.get(code, {})
                                 sitc_shares = c_data.get("sitc_shares", 0)
-                                
-                                # 投信當日或近期買超呈正值
                                 if sitc_shares > 0:
                                     sitc_amount_wan = (sitc_shares * 1000 * price) / 10000.0
                                     t6_results.append({
@@ -748,19 +726,17 @@ with tab6:
                                     })
 
                 # ----------------------------------------------------
-                # 策略 3: 土洋同買 ＋ 成交金額 > 5億 ＋ 外資買>5000萬 ＋ 投信買>2000萬
+                # 指標 3: 土洋同買 ＋ 成交金額 > 5億 ＋ 外資>5000萬 ＋ 投信>2000萬
                 # ----------------------------------------------------
-                elif "策略 3" in strat_option:
+                elif "指標 3" in strat_option:
                     if turnover_amount_yi > 5.0:
                         c_data = chip_info.get(code, {})
                         foreign_shares = c_data.get("foreign_shares", 0)
                         sitc_shares = c_data.get("sitc_shares", 0)
 
-                        # 計算估算買超金額 (單位：萬元)
                         foreign_amount_wan = (foreign_shares * 1000 * price) / 10000.0
                         sitc_amount_wan = (sitc_shares * 1000 * price) / 10000.0
 
-                        # 外資買超 > 5000 萬 (5000 萬) 且 投信買超 > 2000 萬 (2000 萬)
                         if foreign_amount_wan >= 5000.0 and sitc_amount_wan >= 2000.0:
                             t6_results.append({
                                 "股票代號/名稱": get_stock_label(code),
@@ -772,10 +748,41 @@ with tab6:
                                 "KD (K/D)": f"{float(curr['K']):.1f} / {float(curr['D']):.1f}"
                             })
 
+                # ----------------------------------------------------
+                # 指標 4: 6 大正式翻多條件 ＋ 成交金額 > 5億
+                # ----------------------------------------------------
+                elif "指標 4" in strat_option:
+                    if turnover_amount_yi > 5.0:
+                        ma5, ma10, ma60 = float(curr['5MA']), float(curr['10MA']), float(curr['60MA'])
+                        vol_20ma = float(curr['Vol_20MA']) if pd.notna(curr['Vol_20MA']) else 0
+                        
+                        dif_val, dea_val, hist_val = float(curr['MACD_DIF']), float(curr['MACD_DEA']), float(curr['MACD_HIST'])
+                        prev_dif, prev_dea, prev_hist = float(prev['MACD_DIF']), float(prev['MACD_DEA']), float(prev['MACD_HIST'])
+
+                        # 驗證 6 大波段條件
+                        cond1 = price > ma60                              # 1. 股價 > 60MA
+                        cond2 = ma5 > ma10                                # 2. 5MA > 10MA
+                        cond3 = (prev_dif <= prev_dea) and (dif_val > dea_val) # 3. MACD DIF 金叉
+                        cond4 = (prev_hist <= 0) and (hist_val > 0)        # 4. MACD 柱狀體翻紅
+                        cond5 = dif_val > 0                               # 5. DIF > 0 (零軸之上)
+                        cond6 = vol_shares > vol_20ma                     # 6. 成交量 > 20日均量
+
+                        if cond1 and cond2 and cond3 and cond4 and cond5 and cond6:
+                            t6_results.append({
+                                "股票代號/名稱": get_stock_label(code),
+                                "收盤價": f"{price:.2f}",
+                                "成交金額 (億)": f"{turnover_amount_yi:.2f} 億",
+                                "成交量 (張)": int(vol_lots),
+                                "20日均量 (張)": int(vol_20ma / 1000.0),
+                                "MACD (DIF/DEA)": f"{dif_val:.2f} / {dea_val:.2f}",
+                                "MACD 柱狀體": f"{hist_val:+.2f}",
+                                "翻多狀態": "🚀 6 大條件全滿 (大資金起漲)"
+                            })
+
         p_bar6.empty()
 
         if t6_results:
-            st.success(f"🎯 成功精選出 {len(t6_results)} 档符合【{strat_option.split('：')[1].split('(')[0]}】條件的台股標的：")
+            st.success(f"🎯 成功精選出 {len(t6_results)} 檔符合【{strat_option.split('：')[1]}】條件的台股標的：")
             st.dataframe(pd.DataFrame(t6_results), use_container_width=True)
         else:
             st.warning("⚠️ 目前盤面資料中無完全符合此策略門檻之標的。")
