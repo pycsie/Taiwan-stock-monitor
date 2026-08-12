@@ -24,7 +24,7 @@ BUILTIN_STOCKS = {
     "00878": "國泰永續高股息", "00919": "群益台灣精選高息", "00929": "復華台灣科技優息"
 }
 
-# --- 1. Google Sheets 資料庫連線與讀寫函數 (含 KD 設定雲端持久化) ---
+# --- 1. Google Sheets 資料庫連線與讀寫函數 ---
 def get_gsheet_connection():
     return st.connection("gsheets", type=GSheetsConnection)
 
@@ -44,7 +44,6 @@ def load_settings_from_gsheets():
         watchlist = []
         ma_settings = {}
         
-        # 嘗試讀取第一列的通用 KD 全域設定欄位
         enable_kd = default_enable_kd
         max_k = default_max_k
         if 'Enable_KD' in df.columns and pd.notna(df.iloc[0]['Enable_KD']):
@@ -81,7 +80,6 @@ def save_settings_to_gsheets(watchlist, ma_settings, enable_kd, max_k):
         for idx, code in enumerate(watchlist):
             mas = ma_settings.get(code, ALL_MAS)
             mas_str = ", ".join(mas)
-            # 將 KD 設定同步寫入 Google Sheets 欄位中
             rows.append({
                 "Stock": str(code), 
                 "MAs": mas_str,
@@ -95,7 +93,7 @@ def save_settings_to_gsheets(watchlist, ma_settings, enable_kd, max_k):
         st.error(f"❌ 寫入 Google Sheets 失敗: {e}")
         return False
 
-# --- 2. 狀態初始化保護機制 (全數從雲端載入) ---
+# --- 2. 狀態初始化保護機制 ---
 if "watchlist" not in st.session_state or "enable_kd_filter" not in st.session_state:
     db_watchlist, db_ma_settings, db_enable_kd, db_max_k = load_settings_from_gsheets()
     st.session_state.watchlist = db_watchlist
@@ -108,7 +106,6 @@ default_user_id = st.secrets.get("LINE_USER_ID", "") if "LINE_USER_ID" in st.sec
 
 # --- 3. 側邊欄設定與雲端異步同步函數 ---
 def on_kd_setting_change():
-    """當 KD 設定改變時自動儲存至 Google Sheets"""
     st.session_state.enable_kd_filter = st.session_state.input_enable_kd
     st.session_state.max_k_value = st.session_state.input_max_k
     save_settings_to_gsheets(
@@ -158,7 +155,7 @@ if st.sidebar.button("🔄 從 Google Sheets 強制重新載入"):
     st.success("已成功重新載入雲端設定！")
     st.rerun()
 
-# --- 4. 工具函數 ---
+# --- 4. 工具函數 (含 KD 與 MACD 計算) ---
 @st.cache_data(ttl=86400)
 def get_stock_name(code):
     clean_code = str(code).replace(".TW", "").replace(".TWO", "").strip()
@@ -199,10 +196,14 @@ def send_line_message(token, user_id, text):
         return False, f"發送異常: {str(e)}"
 
 def calculate_indicators(df):
+    # 均線
     for ma in [5, 10, 20, 60, 120, 240]:
         df[f'{ma}MA'] = df['Close'].rolling(ma).mean()
     
     df['Vol_5MA'] = df['Volume'].rolling(5).mean()
+    df['Vol_20MA'] = df['Volume'].rolling(20).mean()
+
+    # KD 指標
     low_min = df['Low'].rolling(9).min()
     high_max = df['High'].rolling(9).max()
     rsv = (df['Close'] - low_min) / (high_max - low_min) * 100
@@ -218,6 +219,14 @@ def calculate_indicators(df):
     
     df['K'] = k_list
     df['D'] = d_list
+
+    # MACD 指標 (12, 26, 9)
+    ema12 = df['Close'].ewm(span=12, adjust=False).mean()
+    ema26 = df['Close'].ewm(span=26, adjust=False).mean()
+    df['MACD_DIF'] = ema12 - ema26
+    df['MACD_DEA'] = df['MACD_DIF'].ewm(span=9, adjust=False).mean()
+    df['MACD_HIST'] = df['MACD_DIF'] - df['MACD_DEA']
+
     return df
 
 @st.cache_data(ttl=300)
@@ -240,31 +249,13 @@ def load_stock_data(stock_id):
             continue
     return None
 
-@st.cache_data(ttl=86400)
-def fetch_fundamental_chip_info(stock_id):
-    clean_id = str(stock_id).replace(".TW", "").replace(".TWO", "").strip()
-    for suffix in [".TW", ".TWO"]:
-        try:
-            ticker = yf.Ticker(f"{clean_id}{suffix}")
-            info = ticker.info
-            if info and 'trailingPE' in info:
-                return {
-                    "pe": info.get("trailingPE"),
-                    "pb": info.get("priceToBook"),
-                    "revenue_growth": info.get("revenueGrowth"),
-                    "inst_percent": info.get("heldPercentInstitutions")
-                }
-        except Exception:
-            continue
-    return {"pe": None, "pb": None, "revenue_growth": None, "inst_percent": None}
-
 # --- 5. 主介面 Tabs ---
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "⭐ 我的最愛與自訂均線 (DB連動)", 
     "🔍 單一個股圖表細節", 
     "🚀 帶量紅K短線轉強掃描",
     "🧱 底部大均線尋寶器 (長線支撐型)",
-    "🤖 AI 三位一體起漲尋寶器 (三面合一)"
+    "🤖 AI 波段翻多確認與多頭型態掃描"
 ])
 
 # ==========================================
@@ -353,7 +344,6 @@ with tab1:
                         price = float(raw_price)
                         target_mas = st.session_state.ma_settings.get(code, ALL_MAS)
                         
-                        # 1. 均線型態檢測 (短均 > 長均)
                         ma5, ma10, ma20 = float(last_row['5MA']), float(last_row['10MA']), float(last_row['20MA'])
                         ma120, ma240 = float(last_row['120MA']), float(last_row['240MA'])
                         has_valid_ma = pd.notna(ma5) and pd.notna(ma10) and pd.notna(ma20) and pd.notna(ma120) and pd.notna(ma240)
@@ -363,7 +353,6 @@ with tab1:
                             (ma20 > ma120 and ma20 > ma240)
                         )
 
-                        # 2. KD 指標檢測（已移除 K > D 條件，僅比對 K 值上限）
                         k_val = float(last_row['K']) if pd.notna(last_row['K']) else 0.0
                         d_val = float(last_row['D']) if pd.notna(last_row['D']) else 0.0
                         
@@ -427,7 +416,7 @@ with tab1:
         else:
             st.info(f"💡 目前清單中無同時符合『短均全在長均之上』、『KD 門檻』且與監控均線差距小於 {alert_threshold}% 的個股。")
 
-# (Tab 2, Tab 3, Tab 4, Tab 5 保持與上版完全一致...)
+# Tab 2, Tab 3, Tab 4
 with tab2:
     search_code = st.text_input("輸入台股代號查看技術線圖", value="2330").strip()
     if search_code:
@@ -516,23 +505,51 @@ with tab4:
             p_bar4.empty()
             st.dataframe(pd.DataFrame(bottom_results).sort_values("差距數值").drop(columns=["差距數值"]), use_container_width=True) if bottom_results else st.warning("⚠️ 目前無符合所有硬性條件的股票。")
 
+# ==========================================
+# Tab 5: 波段翻多確認與多頭型態掃描 (全新邏輯)
+# ==========================================
 with tab5:
-    st.subheader("🤖 AI 三位一體：基本面＋技術面＋籌碼面「未起漲/剛起漲」交叉驗證")
-    st.caption("AI 評分模型：篩選打底完成、籌碼收集、且估值合理或具營收成長性的極早期潛力標的。")
+    st.subheader("🤖 台股波段「正式翻多」與多頭階段掃描器")
+    st.caption("依據 6 大核心條件判斷波段翻多訊號，並自動標示波段多頭階段與顯示 KD / MACD 精準數據。")
 
-    col_t5_1, col_t5_2, col_t5_3 = st.columns(3)
+    with st.expander("📌 **查看 6 大核心翻多條件與階段定義**", expanded=False):
+        st.markdown("""
+        **【6 大正式翻多條件】**
+        1. **股價 > 60MA** (站上季線)
+        2. **5MA > 10MA** (短均線金叉)
+        3. **MACD DIF 黃金交叉** (當日 DIF 向上突破 DEA)
+        4. **MACD 柱狀體由負轉正** (Oscillator 翻紅)
+        5. **DIF > 0** (站上零軸強勢區)
+        6. **成交量 > 20日均量** (量能放大)
+
+        **【多頭階段分類】**
+        * 🔥 **正式翻多**：同時滿足上述全部 6 個條件。
+        * 🟡 **提前佈局**：MACD DIF 黃金交叉 ＋ 柱狀體翻紅。
+        * 🟢 **確認買進**：DIF > 0 ＋ 股價站上 60MA ＋ 成交量 > 20日均量。
+        * 🔵 **強勢多頭**：5MA > 10MA > 20MA > 60MA 多頭排列，且 MACD 柱狀體持續向上。
+        """)
+
+    col_t5_1, col_t5_2 = st.columns(2)
     with col_t5_1:
-        max_pe_input = st.number_input("基本面：本益比 (P/E) 上限", min_value=5, max_value=50, value=25, step=1)
+        min_vol_t5 = st.number_input("成交量最低過濾門檻 (張)", min_value=300, value=1000, step=100, key="t5_vol_filter")
     with col_t5_2:
-        max_kd_input = st.number_input("技術面：KD (K值) 防高檔上限", min_value=20, max_value=80, value=65, step=5)
-    with col_t5_3:
-        min_vol_t5 = st.number_input("成交量門檻 (張)", min_value=300, value=1000, step=100, key="t5_vol")
+        filter_mode = st.selectbox(
+            "篩選顯示類別",
+            [
+                "全部符合多頭特徵標的 (含提前佈局/確認買進/強勢多頭/正式翻多)",
+                "🔥 僅顯示 6 大條件完全滿足之【正式翻多】標的",
+                "🟡 僅顯示【提前布局】標的",
+                "🟢 僅顯示【確認買進】標的",
+                "🔵 僅顯示【強勢多頭】標的"
+            ],
+            key="t5_mode"
+        )
 
-    if st.button("🚀 啟動 AI 交叉分析掃描", type="primary", key="btn_t5"):
+    if st.button("🚀 啟動台股波段翻多一鍵掃描", type="primary", key="btn_t5"):
         target_codes = [c for c, i in twstock.codes.items() if i.type == "股票" and len(c) == 4 and c.isdigit()]
-        st.info(f"AI 正在對 {len(target_codes)} 檔股票進行基本面、技術面、籌碼面進行模型檢測...")
+        st.info(f"正在對全台股 {len(target_codes)} 檔股票進行 MACD 與均線多頭型態分析...")
         p_bar5 = st.progress(0)
-        ai_results = []
+        scan_results = []
 
         for idx, code in enumerate(target_codes):
             p_bar5.progress((idx + 1) / len(target_codes))
@@ -546,60 +563,70 @@ with tab5:
                 if vol_lots < min_vol_t5:
                     continue
 
-                tech_score = 0
-                tech_reasons = []
+                # 讀取均線與量能數據
+                ma5, ma10, ma20, ma60 = float(curr['5MA']), float(curr['10MA']), float(curr['20MA']), float(curr['60MA'])
+                vol_20ma = float(curr['Vol_20MA']) / 1000.0 if pd.notna(curr['Vol_20MA']) else 0
 
-                k_val = float(curr['K']) if pd.notna(curr['K']) else 99
-                d_val = float(curr['D']) if pd.notna(curr['D']) else 99
-                prev_k = float(prev['K']) if pd.notna(prev['K']) else 0
-                prev_d = float(prev['D']) if pd.notna(prev['D']) else 0
+                # 讀取 MACD 與 KD 數據
+                k_val, d_val = float(curr['K']), float(curr['D'])
+                dif_val, dea_val, hist_val = float(curr['MACD_DIF']), float(curr['MACD_DEA']), float(curr['MACD_HIST'])
+                prev_dif, prev_dea, prev_hist = float(prev['MACD_DIF']), float(prev['MACD_DEA']), float(prev['MACD_HIST'])
 
-                if k_val <= max_kd_input and prev_k <= prev_d and k_val > d_val:
-                    tech_score += 35
-                    tech_reasons.append(f"KD低檔金叉(K={k_val:.1f})")
+                # 1. 檢測 6 大核心條件
+                cond1 = price > ma60
+                cond2 = ma5 > ma10
+                cond3 = (prev_dif <= prev_dea) and (dif_val > dea_val)  # MACD 金叉
+                cond4 = (prev_hist <= 0) and (hist_val > 0)             # 柱狀體由負轉正
+                cond5 = dif_val > 0                                      # DIF 站上零軸
+                cond6 = vol_lots > vol_20ma                              # 量 > 20日均量
 
-                ma20 = float(curr['20MA']) if pd.notna(curr['20MA']) else 0
-                ma60 = float(curr['60MA']) if pd.notna(curr['60MA']) else 0
-                if price >= ma20 and price >= ma60:
-                    diff_60 = abs(price - ma60) / ma60 * 100
-                    if diff_60 <= 5.0:
-                        tech_score += 35
-                        tech_reasons.append(f"剛站上季線({diff_60:.1f}%)")
+                all_6_conds = cond1 and cond2 and cond3 and cond4 and cond5 and cond6
 
-                if tech_score == 0:
+                # 2. 判斷多頭階段分類
+                stage_tags = []
+                if all_6_conds:
+                    stage_tags.append("🔥 正式翻多")
+                if cond3 and cond4:
+                    stage_tags.append("🟡 提前布局")
+                if cond5 and cond1 and cond6:
+                    stage_tags.append("🟢 確認買進")
+                if (ma5 > ma10 > ma20 > ma60) and (hist_val > prev_hist):
+                    stage_tags.append("🔵 強勢多頭")
+
+                if not stage_tags:
                     continue
 
-                f_info = fetch_fundamental_chip_info(code)
-                pe, pb, rev_growth = f_info['pe'], f_info['pb'], f_info['revenue_growth']
+                # 依據使用者選取的模式進行過濾
+                if "🔥 僅顯示 6 大條件完全滿足" in filter_mode and "🔥 正式翻多" not in stage_tags:
+                    continue
+                elif "🟡 僅顯示【提前布局】" in filter_mode and "🟡 提前布局" not in stage_tags:
+                    continue
+                elif "🟢 僅顯示【確認買進】" in filter_mode and "🟢 確認買進" not in stage_tags:
+                    continue
+                elif "🔵 僅顯示【強勢多頭】" in filter_mode and "🔵 強勢多頭" not in stage_tags:
+                    continue
 
-                fund_score = 0
-                fund_reasons = []
+                # 計算條件滿足數（用作評分排序）
+                passed_count = sum([cond1, cond2, cond3, cond4, cond5, cond6])
 
-                if pe and 0 < pe <= max_pe_input:
-                    fund_score += 15
-                    fund_reasons.append(f"PE低估({pe:.1f})")
-                if rev_growth and rev_growth > 0:
-                    fund_score += 15
-                    fund_reasons.append(f"營收成長({rev_growth*100:.1f}%)")
-
-                total_ai_score = tech_score + fund_score
-
-                if total_ai_score >= 50:
-                    ai_results.append({
-                        "股票代號/名稱": get_stock_label(code),
-                        "AI綜合推薦指數": f"⭐ {total_ai_score} 分",
-                        "收盤價": f"{price:.2f}",
-                        "成交量 (張)": int(vol_lots),
-                        "技術面訊號": " + ".join(tech_reasons) if tech_reasons else "強勢打底",
-                        "基本/籌碼亮點": " | ".join(fund_reasons) if fund_reasons else "估值合理",
-                        "score_num": total_ai_score
-                    })
+                scan_results.append({
+                    "股票代號/名稱": get_stock_label(code),
+                    "型態階段標籤": " ｜ ".join(stage_tags),
+                    "滿足條件數": f"{passed_count} / 6",
+                    "收盤價": f"{price:.2f}",
+                    "成交量 (張)": int(vol_lots),
+                    "20日均量 (張)": int(vol_20ma),
+                    "KD 數值": f"K: {k_val:.1f} / D: {d_val:.1f}",
+                    "MACD (DIF / DEA)": f"{dif_val:.2f} / {dea_val:.2f}",
+                    "MACD 柱狀體": f"{hist_val:+.2f}",
+                    "passed_count_num": passed_count
+                })
 
         p_bar5.empty()
 
-        if ai_results:
-            res_df = pd.DataFrame(ai_results).sort_values("score_num", ascending=False).drop(columns=["score_num"])
-            st.success(f"🤖 AI 模型成功精選出 {len(res_df)} 檔『基本面+技術面+籌碼面』剛起漲/潛力打底個股：")
+        if scan_results:
+            res_df = pd.DataFrame(scan_results).sort_values("passed_count_num", ascending=False).drop(columns=["passed_count_num"])
+            st.success(f"🎯 成功掃描出 {len(res_df)} 檔符合所選多頭特徵之標的：")
             st.dataframe(res_df, use_container_width=True)
         else:
-            st.warning("⚠️ 目前未掃描到符合三位一體高分技術與估值條件的股票。")
+            st.warning("⚠️ 目前市場中無符合所選階段條件的股票。")
