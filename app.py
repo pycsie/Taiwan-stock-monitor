@@ -69,7 +69,7 @@ def load_settings_from_gsheets():
         if not watchlist:
             watchlist, ma_settings = default_watchlist, default_ma_settings
             
-        return watchlist, ma_settings, enable_kd, max_k
+        return watchlist, ma_settings, enable_kd, default_max_k
     except Exception as e:
         st.error(f"⚠️ Google Sheets 連線或讀取失敗，使用暫存資料。錯誤細節: {e}")
         return default_watchlist, default_ma_settings, default_enable_kd, default_max_k
@@ -279,10 +279,9 @@ def fetch_chip_data_twse_tpex():
             
     return chip_dict
 
-# --- 5. 主介面 Tabs (已移除原本的 Tab 2) ---
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+# --- 5. 主介面 Tabs (已移除帶量紅K短線轉強掃描) ---
+tab1, tab2, tab3, tab4 = st.tabs([
     "⭐ 我的最愛與自訂均線 (DB連動)", 
-    "🚀 帶量紅K短線轉強掃描",
     "🧱 底部大均線尋寶器 (長線支撐型)",
     "🤖 AI 波段翻多與多頭型態掃描",
     "🔥 籌碼、爆量與波段翻多複合篩選器"
@@ -446,39 +445,9 @@ with tab1:
             st.info(f"💡 目前清單中無同時符合『短均全在長均之上』、『KD 門檻』且與監控均線差距小於 {alert_threshold}% 的個股。")
 
 # ==========================================
-# Tab 2: 帶量紅K短線轉強掃描
+# Tab 2: 底部大均線尋寶器
 # ==========================================
 with tab2:
-    st.subheader("🚀 全台股帶量紅 K 與均線上彎掃描器")
-    st.caption("硬性條件：【成交量 > 2000張】＋【帶量紅K (量>5日均量1.3倍)】＋【5MA / 10MA / 20MA 至少有一條扣低轉上彎】")
-    col_v, col_s = st.columns(2)
-    with col_v:
-        min_vol_lots = st.number_input("成交量防護門檻 (張)", min_value=500, value=2000, step=500, key="t2_vol")
-    with col_s:
-        scan_scope = st.selectbox("掃描標的範圍", ["熱門大型與權值股 (約 30 檔 - 快速)", "全台股上市上櫃 (約 1800 檔 - 需較長時間)"], key="t2_scope")
-
-    if st.button("🔍 開始掃描強勢標的", type="primary", key="btn_t2"):
-        target_codes = list(BUILTIN_STOCKS.keys()) + ["2303", "2603", "2609", "2615", "3231", "2356", "6669", "3037", "2379", "3034", "2337", "2408", "2344", "2301", "2324", "2353"] if scan_scope.startswith("熱門大型") else [c for c, i in twstock.codes.items() if i.type == "股票" and len(c) == 4 and c.isdigit()]
-        p_bar = st.progress(0)
-        scan_results = []
-        for idx, code in enumerate(target_codes):
-            p_bar.progress((idx + 1) / len(target_codes))
-            df = load_stock_data(code)
-            if df is not None and not df.empty and len(df) >= 25:
-                curr, prev, prev2 = df.iloc[-1], df.iloc[-2], df.iloc[-3]
-                open_p, close_p, vol_shares = float(curr['Open']), float(curr['Close']), float(curr['Volume'])
-                vol_lots, vol_5ma = vol_shares / 1000.0, float(curr['Vol_5MA']) if pd.notna(curr['Vol_5MA']) else 0
-                if vol_lots >= min_vol_lots and close_p > open_p and (vol_5ma > 0 and vol_shares >= vol_5ma * 1.3):
-                    up_mas = [m_name for m_key, m_name in [('5MA', '5日線'), ('10MA', '10日線'), ('20MA', '月線')] if pd.notna(curr[m_key]) and pd.notna(prev[m_key]) and pd.notna(prev2[m_key]) if float(prev[m_key]) <= float(prev2[m_key]) and float(curr[m_key]) > float(prev[m_key]) and close_p >= float(curr[m_key])]
-                    if up_mas:
-                        scan_results.append({"股票代號/名稱": get_stock_label(code), "收盤價": f"{close_p:.2f}", "漲跌K線": f"🔴 紅K (+{(close_p - open_p):.2f})", "成交量 (張)": int(vol_lots), "量增倍數": f"{(vol_shares/vol_5ma):.1f} 倍", "轉上彎均線": "、".join(up_mas), "KD (K值)": round(float(curr['K']), 1) if pd.notna(curr['K']) else "-"})
-        p_bar.empty()
-        st.dataframe(pd.DataFrame(scan_results), use_container_width=True) if scan_results else st.warning("⚠️ 目前無符合條件的股票。")
-
-# ==========================================
-# Tab 3: 底部大均線尋寶器
-# ==========================================
-with tab3:
     st.subheader("🧱 底部大均線（半年線/年線）佈局器")
     st.caption("嚴格條件：【短線均線 (5MA/10MA/20MA) 全數站上 120MA & 240MA】＋【股價貼近長線成本區】")
     col_target_ma, col_dist, col_v3 = st.columns(3)
@@ -523,9 +492,9 @@ with tab3:
             st.dataframe(pd.DataFrame(bottom_results).sort_values("差距數值").drop(columns=["差距數值"]), use_container_width=True) if bottom_results else st.warning("⚠️ 目前無符合所有硬性條件的股票。")
 
 # ==========================================
-# Tab 4: AI 波段翻多與多頭型態掃描
+# Tab 3: AI 波段翻多與多頭型態掃描
 # ==========================================
-with tab4:
+with tab3:
     st.subheader("🤖 台股波段「正式翻多」與多頭階段掃描器")
     st.caption("依據 6 大核心條件判斷波段翻多訊號，並自動標示波段多頭階段與顯示 KD / MACD 精準數據。")
 
@@ -625,9 +594,9 @@ with tab4:
             st.warning("⚠️ 目前市場中無符合所選階段條件的股票。")
 
 # ==========================================
-# Tab 5: 籌碼、爆量與波段翻多複合篩選器
+# Tab 4: 籌碼、爆量與波段翻多複合篩選器
 # ==========================================
-with tab5:
+with tab4:
     st.subheader("🔥 全台股籌碼、爆量突破與 6 大波段翻多篩選器")
     st.caption("支援 4 大核心策略快篩，精準計算成交金額（＞5 億）、法人籌碼數據與技術面指標。")
 
