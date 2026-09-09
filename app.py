@@ -279,17 +279,18 @@ def fetch_chip_data_twse_tpex():
             
     return chip_dict
 
-# --- 5. 主介面 Tabs ---
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+# --- 5. 主介面 Tabs (已移除原本的 Tab 2) ---
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "⭐ 我的最愛與自訂均線 (DB連動)", 
-    "🔍 單一個股圖表細節", 
     "🚀 帶量紅K短線轉強掃描",
     "🧱 底部大均線尋寶器 (長線支撐型)",
     "🤖 AI 波段翻多與多頭型態掃描",
     "🔥 籌碼、爆量與波段翻多複合篩選器"
 ])
 
-# Tab 1 ~ Tab 5
+# ==========================================
+# Tab 1: 我的最愛與自訂均線
+# ==========================================
 with tab1:
     st.subheader("➕ 新增與管理關注個股 (自動同步至 Google Sheets)")
     col_in, col_btn = st.columns([3, 1])
@@ -444,33 +445,19 @@ with tab1:
         else:
             st.info(f"💡 目前清單中無同時符合『短均全在長均之上』、『KD 門檻』且與監控均線差距小於 {alert_threshold}% 的個股。")
 
+# ==========================================
+# Tab 2: 帶量紅K短線轉強掃描
+# ==========================================
 with tab2:
-    search_code = st.text_input("輸入台股代號查看技術線圖", value="2330").strip()
-    if search_code:
-        stock_label = get_stock_label(search_code)
-        df_single = load_stock_data(search_code)
-        if df_single is not None and not df_single.empty:
-            st.subheader(f"📈 {stock_label} 技術線圖")
-            plot_df = df_single.tail(120)
-            fig = go.Figure()
-            fig.add_trace(go.Candlestick(x=plot_df.index, open=plot_df['Open'], high=plot_df['High'], low=plot_df['Low'], close=plot_df['Close'], name='K線'))
-            colors = {'5MA': 'orange', '10MA': 'purple', '20MA': 'blue', '60MA': 'green', '120MA': 'brown', '240MA': 'red'}
-            for ma_col, color in colors.items():
-                if ma_col in plot_df.columns:
-                    fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df[ma_col], mode='lines', name=MA_LABELS[ma_col], line=dict(color=color, width=1.5)))
-            fig.update_layout(xaxis_rangeslider_visible=False, height=550, margin=dict(l=20, r=20, t=20, b=20), template="plotly_white")
-            st.plotly_chart(fig, use_container_width=True)
-
-with tab3:
     st.subheader("🚀 全台股帶量紅 K 與均線上彎掃描器")
     st.caption("硬性條件：【成交量 > 2000張】＋【帶量紅K (量>5日均量1.3倍)】＋【5MA / 10MA / 20MA 至少有一條扣低轉上彎】")
     col_v, col_s = st.columns(2)
     with col_v:
-        min_vol_lots = st.number_input("成交量防護門檻 (張)", min_value=500, value=2000, step=500, key="t3_vol")
+        min_vol_lots = st.number_input("成交量防護門檻 (張)", min_value=500, value=2000, step=500, key="t2_vol")
     with col_s:
-        scan_scope = st.selectbox("掃描標的範圍", ["熱門大型與權值股 (約 30 檔 - 快速)", "全台股上市上櫃 (約 1800 檔 - 需較長時間)"], key="t3_scope")
+        scan_scope = st.selectbox("掃描標的範圍", ["熱門大型與權值股 (約 30 檔 - 快速)", "全台股上市上櫃 (約 1800 檔 - 需較長時間)"], key="t2_scope")
 
-    if st.button("🔍 開始掃描強勢標的", type="primary", key="btn_t3"):
+    if st.button("🔍 開始掃描強勢標的", type="primary", key="btn_t2"):
         target_codes = list(BUILTIN_STOCKS.keys()) + ["2303", "2603", "2609", "2615", "3231", "2356", "6669", "3037", "2379", "3034", "2337", "2408", "2344", "2301", "2324", "2353"] if scan_scope.startswith("熱門大型") else [c for c, i in twstock.codes.items() if i.type == "股票" and len(c) == 4 and c.isdigit()]
         p_bar = st.progress(0)
         scan_results = []
@@ -488,25 +475,28 @@ with tab3:
         p_bar.empty()
         st.dataframe(pd.DataFrame(scan_results), use_container_width=True) if scan_results else st.warning("⚠️ 目前無符合條件的股票。")
 
-with tab4:
+# ==========================================
+# Tab 3: 底部大均線尋寶器
+# ==========================================
+with tab3:
     st.subheader("🧱 底部大均線（半年線/年線）佈局器")
     st.caption("嚴格條件：【短線均線 (5MA/10MA/20MA) 全數站上 120MA & 240MA】＋【股價貼近長線成本區】")
-    col_target_ma, col_dist, col_v4 = st.columns(3)
+    col_target_ma, col_dist, col_v3 = st.columns(3)
     with col_target_ma:
         selected_bottom_mas = st.multiselect("選擇要比對貼近狀況的大均線：", options=['120MA', '240MA'], default=['120MA', '240MA'], format_func=lambda x: f"{x} ({MA_LABELS[x]})")
     with col_dist:
         max_dist_pct = st.number_input("股價/短均距離大均線上限 (%)", min_value=0.5, max_value=15.0, value=5.0, step=0.5)
-    with col_v4:
-        min_vol_bottom = st.number_input("成交量防護門檻 (張)", min_value=500, value=2000, step=500, key="t4_vol")
-    only_red_bottom = st.checkbox("只顯示帶量紅 K（成交量 > 5日均量 1.2倍 且 當日收紅）", value=True, key="t4_red")
+    with col_v3:
+        min_vol_bottom = st.number_input("成交量防護門檻 (張)", min_value=500, value=2000, step=500, key="t3_vol")
+    only_red_bottom = st.checkbox("只顯示帶量紅 K（成交量 > 5日均量 1.2倍 且 當日收紅）", value=True, key="t3_red")
 
-    if st.button("🔍 掃描長線轉強且貼近底部的標的", type="primary", key="btn_t4"):
+    if st.button("🔍 掃描長線轉強且貼近底部的標的", type="primary", key="btn_t3"):
         if selected_bottom_mas:
             target_codes = [c for c, i in twstock.codes.items() if i.type == "股票" and len(c) == 4 and c.isdigit()]
-            p_bar4 = st.progress(0)
+            p_bar3 = st.progress(0)
             bottom_results = []
             for idx, code in enumerate(target_codes):
-                p_bar4.progress((idx + 1) / len(target_codes))
+                p_bar3.progress((idx + 1) / len(target_codes))
                 df = load_stock_data(code)
                 if df is not None and not df.empty and len(df) >= 240:
                     curr = df.iloc[-1]
@@ -529,17 +519,20 @@ with tab4:
                                         if diff_pct < min_abs_diff: min_abs_diff = diff_pct
                                 if near_info:
                                     bottom_results.append({"股票代號/名稱": get_stock_label(code), "收盤價": f"{price:.2f}", "成交量 (張)": int(vol_lots), "貼近狀況 (站上長均)": " | ".join(near_info), "KD (K值)": round(float(curr['K']), 1) if pd.notna(curr['K']) else "-", "距離長均差距 (%)": f"{min_abs_diff:.1f}%", "差距數值": min_abs_diff})
-            p_bar4.empty()
+            p_bar3.empty()
             st.dataframe(pd.DataFrame(bottom_results).sort_values("差距數值").drop(columns=["差距數值"]), use_container_width=True) if bottom_results else st.warning("⚠️ 目前無符合所有硬性條件的股票。")
 
-with tab5:
+# ==========================================
+# Tab 4: AI 波段翻多與多頭型態掃描
+# ==========================================
+with tab4:
     st.subheader("🤖 台股波段「正式翻多」與多頭階段掃描器")
     st.caption("依據 6 大核心條件判斷波段翻多訊號，並自動標示波段多頭階段與顯示 KD / MACD 精準數據。")
 
-    col_t5_1, col_t5_2 = st.columns(2)
-    with col_t5_1:
-        min_vol_t5 = st.number_input("成交量最低過濾門檻 (張)", min_value=300, value=1000, step=100, key="t5_vol_filter")
-    with col_t5_2:
+    col_t4_1, col_t4_2 = st.columns(2)
+    with col_t4_1:
+        min_vol_t4 = st.number_input("成交量最低過濾門檻 (張)", min_value=300, value=1000, step=100, key="t4_vol_filter")
+    with col_t4_2:
         filter_mode = st.selectbox(
             "篩選顯示類別",
             [
@@ -549,16 +542,16 @@ with tab5:
                 "🟢 僅顯示【確認買進】標的",
                 "🔵 僅顯示【強勢多頭】標的"
             ],
-            key="t5_mode"
+            key="t4_mode"
         )
 
-    if st.button("🚀 啟動台股波段翻多一鍵掃描", type="primary", key="btn_t5"):
+    if st.button("🚀 啟動台股波段翻多一鍵掃描", type="primary", key="btn_t4"):
         target_codes = [c for c, i in twstock.codes.items() if i.type == "股票" and len(c) == 4 and c.isdigit()]
-        p_bar5 = st.progress(0)
+        p_bar4 = st.progress(0)
         scan_results = []
 
         for idx, code in enumerate(target_codes):
-            p_bar5.progress((idx + 1) / len(target_codes))
+            p_bar4.progress((idx + 1) / len(target_codes))
             df = load_stock_data(code)
             
             if df is not None and not df.empty and len(df) >= 60:
@@ -566,7 +559,7 @@ with tab5:
                 price = float(curr['Close'])
                 vol_lots = float(curr['Volume']) / 1000.0
 
-                if vol_lots < min_vol_t5:
+                if vol_lots < min_vol_t4:
                     continue
 
                 ma5, ma10, ma20, ma60 = float(curr['5MA']), float(curr['10MA']), float(curr['20MA']), float(curr['60MA'])
@@ -622,7 +615,7 @@ with tab5:
                     "passed_count_num": passed_count
                 })
 
-        p_bar5.empty()
+        p_bar4.empty()
 
         if scan_results:
             res_df = pd.DataFrame(scan_results).sort_values("passed_count_num", ascending=False).drop(columns=["passed_count_num"])
@@ -632,9 +625,9 @@ with tab5:
             st.warning("⚠️ 目前市場中無符合所選階段條件的股票。")
 
 # ==========================================
-# Tab 6: 籌碼、爆量與波段翻多複合篩選器 (修正版)
+# Tab 5: 籌碼、爆量與波段翻多複合篩選器
 # ==========================================
-with tab6:
+with tab5:
     st.subheader("🔥 全台股籌碼、爆量突破與 6 大波段翻多篩選器")
     st.caption("支援 4 大核心策略快篩，精準計算成交金額（＞5 億）、法人籌碼數據與技術面指標。")
 
@@ -647,7 +640,7 @@ with tab6:
             "指標 4：6 大正式翻多條件 ＋ 成交金額 > 5 億 (大資金波段起漲)"
         ],
         index=0,
-        key="t6_strat_choice"
+        key="t5_strat_choice"
     )
 
     with st.expander("📌 **點此展開查看『指標 4：6 大正式翻多條件』詳細說明**"):
@@ -662,7 +655,7 @@ with tab6:
         * **硬性加算門檻**：當日成交金額必須 $> 5$ 億台幣。
         """)
 
-    if st.button("⚡ 啟動全台股籌碼與指標快篩", type="primary", key="btn_t6"):
+    if st.button("⚡ 啟動全台股籌碼與指標快篩", type="primary", key="btn_t5_chip"):
         target_codes = [c for c, i in twstock.codes.items() if i.type == "股票" and len(c) == 4 and c.isdigit()]
         
         # 預先同步證交所公開資料
@@ -670,11 +663,11 @@ with tab6:
             chip_info = fetch_chip_data_twse_tpex()
 
         st.info(f"正在對全台股 {len(target_codes)} 檔股票進行成交金額、法人籌碼與技術面即時運算...")
-        p_bar6 = st.progress(0)
-        t6_results = []
+        p_bar5 = st.progress(0)
+        t5_results = []
 
         for idx, code in enumerate(target_codes):
-            p_bar6.progress((idx + 1) / len(target_codes))
+            p_bar5.progress((idx + 1) / len(target_codes))
             df = load_stock_data(code)
             
             if df is not None and not df.empty and len(df) >= 60:
@@ -693,7 +686,7 @@ with tab6:
                     if turnover_amount_yi > 5.0:
                         last_10_vols = df['Volume'].tail(10).tolist()
                         if len(last_10_vols) >= 10 and vol_shares >= max(last_10_vols):
-                            t6_results.append({
+                            t5_results.append({
                                 "股票代號/名稱": get_stock_label(code),
                                 "收盤價": f"{price:.2f}",
                                 "成交金額 (億)": f"{turnover_amount_yi:.2f} 億",
@@ -715,7 +708,7 @@ with tab6:
                                 sitc_shares = c_data.get("sitc_shares", 0)
                                 if sitc_shares > 0:
                                     sitc_amount_wan = (sitc_shares * 1000 * price) / 10000.0
-                                    t6_results.append({
+                                    t5_results.append({
                                         "股票代號/名稱": get_stock_label(code),
                                         "收盤價": f"{price:.2f}",
                                         "成交金額 (億)": f"{turnover_amount_yi:.2f} 億",
@@ -738,7 +731,7 @@ with tab6:
                         sitc_amount_wan = (sitc_shares * 1000 * price) / 10000.0
 
                         if foreign_amount_wan >= 5000.0 and sitc_amount_wan >= 2000.0:
-                            t6_results.append({
+                            t5_results.append({
                                 "股票代號/名稱": get_stock_label(code),
                                 "收盤價": f"{price:.2f}",
                                 "成交金額 (億)": f"{turnover_amount_yi:.2f} 億",
@@ -768,7 +761,7 @@ with tab6:
                         cond6 = vol_shares > vol_20ma                     # 6. 成交量 > 20日均量
 
                         if cond1 and cond2 and cond3 and cond4 and cond5 and cond6:
-                            t6_results.append({
+                            t5_results.append({
                                 "股票代號/名稱": get_stock_label(code),
                                 "收盤價": f"{price:.2f}",
                                 "成交金額 (億)": f"{turnover_amount_yi:.2f} 億",
@@ -779,10 +772,10 @@ with tab6:
                                 "翻多狀態": "🚀 6 大條件全滿 (大資金起漲)"
                             })
 
-        p_bar6.empty()
+        p_bar5.empty()
 
-        if t6_results:
-            st.success(f"🎯 成功精選出 {len(t6_results)} 檔符合【{strat_option.split('：')[1]}】條件的台股標的：")
-            st.dataframe(pd.DataFrame(t6_results), use_container_width=True)
+        if t5_results:
+            st.success(f"🎯 成功精選出 {len(t5_results)} 檔符合【{strat_option.split('：')[1]}】條件的台股標的：")
+            st.dataframe(pd.DataFrame(t5_results), use_container_width=True)
         else:
             st.warning("⚠️ 目前盤面資料中無完全符合此策略門檻之標的。")
