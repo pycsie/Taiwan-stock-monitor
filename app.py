@@ -279,12 +279,49 @@ def fetch_chip_data_twse_tpex():
             
     return chip_dict
 
-# --- 5. 主介面 Tabs (已移除帶量紅K短線轉強掃描) ---
-tab1, tab2, tab3, tab4 = st.tabs([
+# --- 證交所融資融券餘額數據抓取 ---
+@st.cache_data(ttl=3600)
+def fetch_margin_data_twse():
+    margin_dict = {}
+    today = datetime.now()
+    
+    for day_offset in range(5):
+        target_date = today - timedelta(days=day_offset)
+        date_str = target_date.strftime("%Y%m%d")
+        
+        url = f"https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGIN?response=json&date={date_str}&selectType=ALL"
+        try:
+            r = requests.get(url, timeout=5)
+            if r.status_code == 200:
+                data = r.json()
+                if data.get("stat") == "OK" and "data" in data:
+                    for row in data["data"]:
+                        code = row[0].strip()
+                        if len(code) == 4 and code.isdigit():
+                            try:
+                                # 融資今日餘額與前日差額 (張)
+                                margin_diff = float(row[6].replace(",", "")) if len(row) > 6 else 0.0
+                                margin_bal = float(row[5].replace(",", "")) if len(row) > 5 else 0.0
+                                margin_dict[code] = {
+                                    "margin_diff": margin_diff,
+                                    "margin_bal": margin_bal
+                                }
+                            except ValueError:
+                                continue
+                    if margin_dict:
+                        break
+        except Exception:
+            pass
+            
+    return margin_dict
+
+# --- 5. 主介面 Tabs ---
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "⭐ 我的最愛與自訂均線 (DB連動)", 
     "🧱 底部大均線尋寶器 (長線支撐型)",
     "🤖 AI 波段翻多與多頭型態掃描",
-    "🔥 籌碼、爆量與波段翻多複合篩選器"
+    "🔥 籌碼、爆量與波段翻多複合篩選器",
+    "🛡️ 底部籌碼洗淨與均線卡位掃描器"
 ])
 
 # ==========================================
@@ -748,3 +785,161 @@ with tab4:
             st.dataframe(pd.DataFrame(t5_results), use_container_width=True)
         else:
             st.warning("⚠️ 目前盤面資料中無完全符合此策略門檻之標的。")
+
+# ==========================================
+# Tab 5: 底部籌碼洗淨與均線卡位掃描器 (新功能)
+# ==========================================
+with tab5:
+    st.subheader("🛡️ 底部籌碼洗淨與大均線卡位掃描器")
+    st.caption("專為尋找【股價基期低、散戶融資退場、主力默默卡位】的長線抱牢標的設計。")
+
+    col_m1, col_m2, col_m3 = st.columns(3)
+    
+    with col_m1:
+        macd_filter = st.selectbox(
+            "MACD 狀態篩選：",
+            ["不限", "MACD DIF 為正 (零軸之上，多頭氣勢)", "MACD DIF 為負 (零軸之下，超跌築底)", "MACD 柱狀體剛翻紅 (轉強點)"],
+            index=0,
+            key="t6_macd"
+        )
+        
+    with col_m2:
+        ma_target = st.selectbox(
+            "卡位均線種類：",
+            ["20MA (月線)", "120MA (半年線)", "240MA (年線)"],
+            index=1,
+            key="t6_ma_target"
+        )
+
+    with col_m3:
+        ma_position = st.selectbox(
+            "股價與該均線相對位置：",
+            ["剛站上 (距離均線 0% ~ 3%)", "均線下方打底 (距離均線 -5% ~ 0%)", "均線附近徘徊 (距離均線 -3% ~ +3%)"],
+            index=0,
+            key="t6_ma_pos"
+        )
+
+    col_c1, col_c2, col_c3 = st.columns(3)
+    with col_c1:
+        margin_filter = st.selectbox(
+            "融資洗碼過濾 (散戶退場)：",
+            ["不限", "融資減少 (當日減少)", "融資退場 (近五日減少或持平)"],
+            index=1,
+            key="t6_margin"
+        )
+    with col_c2:
+        extra_chip = st.checkbox("加項：三大法人 (外資/投信) 有買超卡位", value=True, key="t6_chip")
+    with col_c3:
+        kd_low_filter = st.checkbox("加項：KD 位於低檔區 (K < 40，絕佳買點)", value=True, key="t6_kd_low")
+
+    if st.button("🛡️ 啟動全台股底部籌碼與均線卡位掃描", type="primary", key="btn_t6_scan"):
+        target_codes = [c for c, i in twstock.codes.items() if i.type == "股票" and len(c) == 4 and c.isdigit()]
+        
+        with st.spinner("同步三大法人與證交所融資餘額最新數據中..."):
+            chip_info = fetch_chip_data_twse_tpex()
+            margin_info = fetch_margin_data_twse()
+
+        st.info(f"正在針對全台股 {len(target_codes)} 檔股票進行底部技術面與融資洗碼分析...")
+        p_bar6 = st.progress(0)
+        t6_results = []
+
+        ma_key_map = {"20MA (月線)": "20MA", "120MA (半年線)": "120MA", "240MA (年線)": "240MA"}
+        selected_ma_key = ma_key_map[ma_target]
+
+        for idx, code in enumerate(target_codes):
+            p_bar6.progress((idx + 1) / len(target_codes))
+            df = load_stock_data(code)
+            
+            if df is not None and not df.empty and len(df) >= 240:
+                curr, prev = df.iloc[-1], df.iloc[-2]
+                price = float(curr['Close'])
+                
+                # 1. 均線位置判斷
+                if selected_ma_key not in curr or pd.isna(curr[selected_ma_key]):
+                    continue
+                ma_val = float(curr[selected_ma_key])
+                diff_pct = ((price - ma_val) / ma_val) * 100.0
+
+                pos_pass = False
+                pos_desc = ""
+                if "剛站上" in ma_position and (0.0 <= diff_pct <= 3.0):
+                    pos_pass = True
+                    pos_desc = f"剛站上 ({diff_pct:+.1f}%)"
+                elif "均線下方" in ma_position and (-5.0 <= diff_pct <= 0.0):
+                    pos_pass = True
+                    pos_desc = f"下方打底 ({diff_pct:+.1f}%)"
+                elif "均線附近" in ma_position and (-3.0 <= diff_pct <= 3.0):
+                    pos_pass = True
+                    pos_desc = f"均線附近 ({diff_pct:+.1f}%)"
+
+                if not pos_pass:
+                    continue
+
+                # 2. MACD 條件過濾
+                dif_val = float(curr['MACD_DIF']) if pd.notna(curr['MACD_DIF']) else 0.0
+                hist_val = float(curr['MACD_HIST']) if pd.notna(curr['MACD_HIST']) else 0.0
+                prev_hist = float(prev['MACD_HIST']) if pd.notna(prev['MACD_HIST']) else 0.0
+
+                macd_pass = True
+                if "MACD DIF 為正" in macd_filter and dif_val <= 0:
+                    macd_pass = False
+                elif "MACD DIF 為負" in macd_filter and dif_val >= 0:
+                    macd_pass = False
+                elif "MACD 柱狀體剛翻紅" in macd_filter and not (prev_hist <= 0 and hist_val > 0):
+                    macd_pass = False
+
+                if not macd_pass:
+                    continue
+
+                # 3. KD 低檔過濾
+                k_val = float(curr['K']) if pd.notna(curr['K']) else 50.0
+                d_val = float(curr['D']) if pd.notna(curr['D']) else 50.0
+                if kd_low_filter and k_val >= 40:
+                    continue
+
+                # 4. 融資洗碼過濾
+                m_data = margin_info.get(code, {})
+                margin_diff = m_data.get("margin_diff", 0.0)
+                
+                margin_pass = True
+                if "融資減少" in margin_filter and margin_diff >= 0:
+                    margin_pass = False
+                elif "融資退場" in margin_filter and margin_diff > 0:
+                    margin_pass = False
+
+                if not margin_pass:
+                    continue
+
+                # 5. 法人籌碼加項過濾
+                c_data = chip_info.get(code, {})
+                foreign_s = c_data.get("foreign_shares", 0)
+                sitc_s = c_data.get("sitc_shares", 0)
+                
+                if extra_chip and (foreign_s <= 0 and sitc_s <= 0):
+                    continue
+
+                chip_desc = []
+                if foreign_s > 0: chip_desc.append(f"外資+{int(foreign_s)}張")
+                if sitc_s > 0: chip_desc.append(f"投信+{int(sitc_s)}張")
+                chip_str = ", ".join(chip_desc) if chip_desc else "無法人買超"
+
+                m_str = f"{int(margin_diff)} 張" if margin_diff != 0 else "持平/無資料"
+
+                t6_results.append({
+                    "股票代號/名稱": get_stock_label(code),
+                    "收盤價": f"{price:.2f}",
+                    "對應均線": f"{ma_target} ({ma_val:.2f})",
+                    "位置狀態": pos_desc,
+                    "MACD DIF / 柱狀體": f"{dif_val:.2f} / {hist_val:+.2f}",
+                    "KD 指標": f"K: {k_val:.1f} / D: {d_val:.1f}",
+                    "融資單日變化": m_str,
+                    "法人買超卡位": chip_str
+                })
+
+        p_bar6.empty()
+
+        if t6_results:
+            st.success(f"🎯 成功幫您找出 {len(t6_results)} 檔籌碼洗淨、基期低且接近均線的穩健標的：")
+            st.dataframe(pd.DataFrame(t6_results), use_container_width=True)
+        else:
+            st.warning("⚠️ 目前盤面資料中無完全符合此條件的標的，建議可稍微放寬均線距離或 MACD 條件再試試。")
