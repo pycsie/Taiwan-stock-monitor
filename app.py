@@ -247,6 +247,27 @@ def load_stock_data(stock_id):
             continue
     return None
 
+# --- 盤中即時 (1m/5m) 數據抓取 ---
+@st.cache_data(ttl=30)
+def load_realtime_stock_data(stock_id, interval="5m"):
+    clean_id = str(stock_id).replace(".TW", "").replace(".TWO", "").strip()
+    for suffix in [".TW", ".TWO"]:
+        symbol = f"{clean_id}{suffix}"
+        try:
+            data = yf.download(symbol, period="5d", interval=interval, progress=False)
+            if data is None or data.empty:
+                continue
+            if isinstance(data.columns, pd.MultiIndex):
+                data.columns = data.columns.get_level_values(0)
+            if 'Close' in data.columns:
+                data = data.dropna(subset=['Close'])
+            if data.empty or len(data) < 10:
+                continue
+            return calculate_indicators(data)
+        except Exception:
+            continue
+    return None
+
 # --- TWSE / TPEx 三大法人的官方 API 資料抓取 ---
 @st.cache_data(ttl=3600)
 def fetch_chip_data_twse_tpex():
@@ -299,7 +320,6 @@ def fetch_margin_data_twse():
                         code = row[0].strip()
                         if len(code) == 4 and code.isdigit():
                             try:
-                                # 融資今日餘額與前日差額 (張)
                                 margin_diff = float(row[6].replace(",", "")) if len(row) > 6 else 0.0
                                 margin_bal = float(row[5].replace(",", "")) if len(row) > 5 else 0.0
                                 margin_dict[code] = {
@@ -316,12 +336,13 @@ def fetch_margin_data_twse():
     return margin_dict
 
 # --- 5. 主介面 Tabs ---
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "⭐ 我的最愛與自訂均線 (DB連動)", 
     "🧱 底部大均線尋寶器 (長線支撐型)",
     "🤖 AI 波段翻多與多頭型態掃描",
     "🔥 籌碼、爆量與波段翻多複合篩選器",
-    "🛡️ 底部籌碼洗淨與均線卡位掃描器"
+    "🛡️ 底部籌碼洗淨與均線卡位掃描器",
+    "⚡ 盤中即時當沖與大小單同買監測"
 ])
 
 # ==========================================
@@ -664,7 +685,6 @@ with tab4:
     if st.button("⚡ 啟動全台股籌碼與指標快篩", type="primary", key="btn_t5_chip"):
         target_codes = [c for c, i in twstock.codes.items() if i.type == "股票" and len(c) == 4 and c.isdigit()]
         
-        # 預先同步證交所公開資料
         with st.spinner("正在向證交所同步最新三大法人籌碼資料..."):
             chip_info = fetch_chip_data_twse_tpex()
 
@@ -681,13 +701,8 @@ with tab4:
                 price = float(curr['Close'])
                 vol_shares = float(curr['Volume'])
                 vol_lots = vol_shares / 1000.0
-                
-                # 成交金額 (收盤價 * 當日成交股數，單位：億台幣)
                 turnover_amount_yi = (price * vol_shares) / 1_0000_0000.0
 
-                # ----------------------------------------------------
-                # 指標 1: 成交金額 > 5億 ＋ 成交量創 10 日新高
-                # ----------------------------------------------------
                 if "指標 1" in strat_option:
                     if turnover_amount_yi > 5.0:
                         last_10_vols = df['Volume'].tail(10).tolist()
@@ -701,9 +716,6 @@ with tab4:
                                 "KD (K/D)": f"{float(curr['K']):.1f} / {float(curr['D']):.1f}"
                             })
 
-                # ----------------------------------------------------
-                # 指標 2: 成交金額 > 5億 ＋ 投信3日內買超 ＋ 40日高價乖離 -2% ~ +2%
-                # ----------------------------------------------------
                 elif "指標 2" in strat_option:
                     if turnover_amount_yi > 5.0:
                         high_40 = df['High'].tail(40).max()
@@ -724,9 +736,6 @@ with tab4:
                                         "KD (K/D)": f"{float(curr['K']):.1f} / {float(curr['D']):.1f}"
                                     })
 
-                # ----------------------------------------------------
-                # 指標 3: 土洋同買 ＋ 成交金額 > 5億 ＋ 外資>5000萬 ＋ 投信>2000萬
-                # ----------------------------------------------------
                 elif "指標 3" in strat_option:
                     if turnover_amount_yi > 5.0:
                         c_data = chip_info.get(code, {})
@@ -747,9 +756,6 @@ with tab4:
                                 "KD (K/D)": f"{float(curr['K']):.1f} / {float(curr['D']):.1f}"
                             })
 
-                # ----------------------------------------------------
-                # 指標 4: 6 大正式翻多條件 ＋ 成交金額 > 5億
-                # ----------------------------------------------------
                 elif "指標 4" in strat_option:
                     if turnover_amount_yi > 5.0:
                         ma5, ma10, ma60 = float(curr['5MA']), float(curr['10MA']), float(curr['60MA'])
@@ -758,13 +764,12 @@ with tab4:
                         dif_val, dea_val, hist_val = float(curr['MACD_DIF']), float(curr['MACD_DEA']), float(curr['MACD_HIST'])
                         prev_dif, prev_dea, prev_hist = float(prev['MACD_DIF']), float(prev['MACD_DEA']), float(prev['MACD_HIST'])
 
-                        # 驗證 6 大波段條件
-                        cond1 = price > ma60                              # 1. 股價 > 60MA
-                        cond2 = ma5 > ma10                                # 2. 5MA > 10MA
-                        cond3 = (prev_dif <= prev_dea) and (dif_val > dea_val) # 3. MACD DIF 金叉
-                        cond4 = (prev_hist <= 0) and (hist_val > 0)        # 4. MACD 柱狀體翻紅
-                        cond5 = dif_val > 0                               # 5. DIF > 0 (零軸之上)
-                        cond6 = vol_shares > vol_20ma                     # 6. 成交量 > 20日均量
+                        cond1 = price > ma60
+                        cond2 = ma5 > ma10
+                        cond3 = (prev_dif <= prev_dea) and (dif_val > dea_val)
+                        cond4 = (prev_hist <= 0) and (hist_val > 0)
+                        cond5 = dif_val > 0
+                        cond6 = vol_shares > vol_20ma
 
                         if cond1 and cond2 and cond3 and cond4 and cond5 and cond6:
                             t5_results.append({
@@ -787,7 +792,7 @@ with tab4:
             st.warning("⚠️ 目前盤面資料中無完全符合此策略門檻之標的。")
 
 # ==========================================
-# Tab 5: 底部籌碼洗淨與均線卡位掃描器 (新功能)
+# Tab 5: 底部籌碼洗淨與均線卡位掃描器
 # ==========================================
 with tab5:
     st.subheader("🛡️ 底部籌碼洗淨與大均線卡位掃描器")
@@ -854,7 +859,6 @@ with tab5:
                 curr, prev = df.iloc[-1], df.iloc[-2]
                 price = float(curr['Close'])
                 
-                # 1. 均線位置判斷
                 if selected_ma_key not in curr or pd.isna(curr[selected_ma_key]):
                     continue
                 ma_val = float(curr[selected_ma_key])
@@ -875,7 +879,6 @@ with tab5:
                 if not pos_pass:
                     continue
 
-                # 2. MACD 條件過濾
                 dif_val = float(curr['MACD_DIF']) if pd.notna(curr['MACD_DIF']) else 0.0
                 hist_val = float(curr['MACD_HIST']) if pd.notna(curr['MACD_HIST']) else 0.0
                 prev_hist = float(prev['MACD_HIST']) if pd.notna(prev['MACD_HIST']) else 0.0
@@ -891,13 +894,11 @@ with tab5:
                 if not macd_pass:
                     continue
 
-                # 3. KD 低檔過濾
                 k_val = float(curr['K']) if pd.notna(curr['K']) else 50.0
                 d_val = float(curr['D']) if pd.notna(curr['D']) else 50.0
                 if kd_low_filter and k_val >= 40:
                     continue
 
-                # 4. 融資洗碼過濾
                 m_data = margin_info.get(code, {})
                 margin_diff = m_data.get("margin_diff", 0.0)
                 
@@ -910,7 +911,6 @@ with tab5:
                 if not margin_pass:
                     continue
 
-                # 5. 法人籌碼加項過濾
                 c_data = chip_info.get(code, {})
                 foreign_s = c_data.get("foreign_shares", 0)
                 sitc_s = c_data.get("sitc_shares", 0)
@@ -943,3 +943,171 @@ with tab5:
             st.dataframe(pd.DataFrame(t6_results), use_container_width=True)
         else:
             st.warning("⚠️ 目前盤面資料中無完全符合此條件的標的，建議可稍微放寬均線距離或 MACD 條件再試試。")
+
+# ==========================================
+# Tab 6: 盤中即時當沖與大小單同買監測
+# ==========================================
+with tab6:
+    st.subheader("⚡ 盤中即時當沖做多與大/小單同步買超監測")
+    st.caption("🎯 專為當沖做多設計：嚴格要求【大單買超 > 0】且【小單買超 > 0】，排除一買一賣（散戶倒貨或主力出貨）的阻力格局。")
+
+    col_rt_mode, col_rt_ma, col_rt_th = st.columns(3)
+    
+    with col_rt_mode:
+        rt_strategy = st.selectbox(
+            "盤中當沖做多策略模式：",
+            [
+                "🚀 當沖必勝：大小單同步累積買超 + 拉回均線點",
+                "⚡ 盤中即時拉回均線買點 (開高走低量縮回測)",
+                "📈 盤中即時突破關鍵點 (突破前日高點或大均線)",
+                "🎯 盤中短線 KD 金叉＋低檔過濾 (K<40 向上穿越)"
+            ],
+            index=0,
+            key="rt_strat_choice"
+        )
+
+    with col_rt_ma:
+        rt_ma_target = st.selectbox(
+            "盤中支撐/參考均線：",
+            ["5MA (5日線)", "10MA (10日線)", "20MA (月線)", "60MA (季線)"],
+            index=0, # 當沖預設參考 5MA
+            key="rt_ma_target"
+        )
+
+    with col_rt_th:
+        rt_dist_threshold = st.number_input("距離均線門檻 (%)", min_value=0.1, max_value=3.0, value=0.8, step=0.1, key="rt_dist")
+
+    col_rt_b1, col_rt_b2 = st.columns(2)
+    with col_rt_b1:
+        rt_volume_filter = st.checkbox("限制盤中當日成交量 > 預估 5 日均量 0.8 倍 (確保當沖流動性)", value=True, key="rt_vol_filter")
+    with col_rt_b2:
+        rt_time_freq = st.selectbox("分時頻率：", ["5分鐘線 (5m)", "1分鐘線 (1m)"], index=1, key="rt_freq") # 當沖預設 1m
+
+    if st.button("⚡ 啟動當沖大/小單同買一鍵監測", type="primary", key="btn_rt_scan"):
+        scan_codes = list(st.session_state.watchlist)
+        if len(scan_codes) < 10:
+            for b_code in BUILTIN_STOCKS.keys():
+                if b_code not in scan_codes:
+                    scan_codes.append(b_code)
+
+        st.info(f"正在對 {len(scan_codes)} 檔當沖候選標的進行 1m/5m 分時大/小單方向與即時均線運算...")
+        p_bar_rt = st.progress(0)
+        rt_results = []
+
+        ma_rt_map = {"5MA (5日線)": "5MA", "10MA (10日線)": "10MA", "20MA (月線)": "20MA", "60MA (季線)": "60MA"}
+        selected_rt_ma_key = ma_rt_map[rt_ma_target]
+        freq_str = "5m" if "5m" in rt_time_freq else "1m"
+
+        for idx, code in enumerate(scan_codes):
+            p_bar_rt.progress((idx + 1) / len(scan_codes))
+            
+            df_daily = load_stock_data(code)
+            df_rt = load_realtime_stock_data(code, interval=freq_str)
+
+            if df_daily is not None and not df_daily.empty and df_rt is not None and not df_rt.empty:
+                daily_last = df_daily.iloc[-1]
+                daily_prev = df_daily.iloc[-2] if len(df_daily) >= 2 else daily_last
+                
+                rt_curr = df_rt.iloc[-1]
+                rt_prev = df_rt.iloc[-2] if len(df_rt) >= 2 else rt_curr
+                
+                rt_price = float(rt_curr['Close'])
+                prev_day_high = float(daily_prev['High'])
+                vol_5ma = float(daily_last['Vol_5MA']) if pd.notna(daily_last['Vol_5MA']) else 0
+                day_vol_shares = df_rt['Volume'].sum()
+
+                if rt_volume_filter and vol_5ma > 0:
+                    if (day_vol_shares / 1000.0) < (vol_5ma / 1000.0 * 0.8):
+                        continue
+
+                # --- 當沖大/小單累積買超運算核心 ---
+                large_order_threshold = 80  # 單根 K 棒量 > 80 張算大單，<= 80 張算小單
+                
+                df_rt['Direction'] = df_rt.apply(lambda row: 1 if row['Close'] >= row['Open'] else -1, axis=1)
+                df_rt['Vol_Lots'] = df_rt['Volume'] / 1000.0
+
+                df_large = df_rt[df_rt['Vol_Lots'] >= large_order_threshold]
+                df_small = df_rt[df_rt['Vol_Lots'] < large_order_threshold]
+
+                large_net_buy = (df_large['Vol_Lots'] * df_large['Direction']).sum()
+                small_net_buy = (df_small['Vol_Lots'] * df_small['Direction']).sum()
+
+                # 🎯 核心當沖規則：大單與小單必須同時 > 0，堅決排除一買一賣！
+                is_both_buying = (large_net_buy > 0) and (small_net_buy > 0)
+
+                # 1. 策略 1：當沖必勝 (大小單同步買超 + 靠近均線)
+                if "大小單同步累積買超" in rt_strategy:
+                    if not is_both_buying:
+                        continue
+                    
+                    if selected_rt_ma_key in daily_last and pd.notna(daily_last[selected_rt_ma_key]):
+                        ma_val = float(daily_last[selected_rt_ma_key])
+                        diff_pct = ((rt_price - ma_val) / ma_val) * 100.0
+
+                        if 0 <= diff_pct <= rt_dist_threshold:
+                            rt_results.append({
+                                "股票代號/名稱": get_stock_label(code),
+                                "即時現價": f"{rt_price:.2f}",
+                                "大單累積買超": f"+{int(large_net_buy)} 張",
+                                "小單累積買超": f"+{int(small_net_buy)} 張",
+                                "籌碼狀態": "🔥 大小單同步買超 (無倒貨賣壓)",
+                                "參考均線": f"{rt_ma_target} ({ma_val:.2f})",
+                                "均線距離 (%)": f"+{diff_pct:.2f}%",
+                                "當沖建議": "⚡ 支撐有守，可順勢作多"
+                            })
+
+                # 2. 其他當沖輔助策略
+                elif "拉回均線" in rt_strategy:
+                    if selected_rt_ma_key in daily_last and pd.notna(daily_last[selected_rt_ma_key]):
+                        ma_val = float(daily_last[selected_rt_ma_key])
+                        diff_pct = ((rt_price - ma_val) / ma_val) * 100.0
+
+                        if 0 <= diff_pct <= rt_dist_threshold:
+                            chip_status = "🔥 同步買超" if is_both_buying else ("⚠️ 一買一賣" if (large_net_buy * small_net_buy < 0) else "持平")
+                            rt_results.append({
+                                "股票代號/名稱": get_stock_label(code),
+                                "即時現價": f"{rt_price:.2f}",
+                                "大單買超": f"{int(large_net_buy):+} 張",
+                                "小單買超": f"{int(small_net_buy):+} 張",
+                                "籌碼狀態": chip_status,
+                                "參考均線": f"{rt_ma_target} ({ma_val:.2f})",
+                                "距離門檻 (%)": f"+{diff_pct:.2f}%",
+                                "即時 KD": f"K:{float(rt_curr['K']):.1f} / D:{float(rt_curr['D']):.1f}"
+                            })
+
+                elif "突破關鍵點" in rt_strategy:
+                    ma_val = float(daily_last[selected_rt_ma_key]) if selected_rt_ma_key in daily_last else 0
+                    if rt_price > prev_day_high or (ma_val > 0 and rt_price > ma_val and float(rt_prev['Close']) <= ma_val):
+                        if is_both_buying:
+                            rt_results.append({
+                                "股票代號/名稱": get_stock_label(code),
+                                "即時現價": f"{rt_price:.2f}",
+                                "大單買超": f"+{int(large_net_buy)} 張",
+                                "小單買超": f"+{int(small_net_buy)} 張",
+                                "前日最高價": f"{prev_day_high:.2f}",
+                                "即時 KD": f"K:{float(rt_curr['K']):.1f} / D:{float(rt_curr['D']):.1f}",
+                                "買點訊號": "🔥 帶量突破 + 大小單同買"
+                            })
+
+                elif "KD 金叉" in rt_strategy:
+                    k_curr, d_curr = float(rt_curr['K']), float(rt_curr['D'])
+                    k_prev, d_prev = float(rt_prev['K']), float(rt_prev['D'])
+
+                    if (k_prev <= d_prev) and (k_curr > d_curr) and (k_curr < 40):
+                        if is_both_buying:
+                            rt_results.append({
+                                "股票代號/名稱": get_stock_label(code),
+                                "即時現價": f"{rt_price:.2f}",
+                                "大單買超": f"+{int(large_net_buy)} 張",
+                                "小單買超": f"+{int(small_net_buy)} 張",
+                                "即時 KD": f"K:{k_curr:.1f} (D:{d_curr:.1f})",
+                                "買點訊號": "⚡ 分時低檔金叉 + 大小單同買"
+                            })
+
+        p_bar_rt.empty()
+
+        if rt_results:
+            st.success(f"⚡ 當沖做多精準觸發！共發現 {len(rt_results)} 檔符合【大小單同步買超】且極具勝率之標的：")
+            st.dataframe(pd.DataFrame(rt_results), use_container_width=True)
+        else:
+            st.warning("⚠️ 當前盤中無完全符合「大小單同時買超 + 回測均線」的標的（可能部分標的處於一買一賣阻力區），請隨時重新整理。")
