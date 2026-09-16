@@ -941,7 +941,7 @@ with tab5:
 # ==========================================
 with tab6:
     st.subheader("🌐 全台股即時大/小單同步買超監測")
-    st.caption("📌 監控範圍：全台股上市櫃標的 ｜ 篩選條件：【目前小單累計買超 > 0】＋【目前大單累計買超 > 0】")
+    st.caption("📌 監控範圍：全台股上市櫃標的 ｜ 篩選條件：【目前成交量 > 1,000張】＋【小單累計買超 > 0】＋【大單累計買超 > 0】")
 
     # 1. 建立/初始化全台股資料庫 (模擬全台股 1,000+ 檔股票清單)
     @st.cache_data
@@ -968,7 +968,7 @@ with tab6:
         for code, name in stock_universe:
             st.session_state.tab6_full_market[code] = {
                 "name": name,
-                "curr_vol": random.randint(500, 10000), # 目前累計成交量
+                "curr_vol": random.randint(100, 15000), # 目前累計成交量 (含小於與大於1000張)
                 "small_buy": random.randint(50, 500),
                 "small_sell": random.randint(50, 500),
                 "big_buy": random.randint(100, 2000),
@@ -1021,26 +1021,26 @@ with tab6:
 
         # 廣域掃描全市場所有標的
         for code, data in st.session_state.tab6_full_market.items():
-            # 計算小單與大單累計淨買超 (買 - 賣)
+            curr_vol = data["curr_vol"]
             small_net = data["small_buy"] - data["small_sell"]
             big_net = data["big_buy"] - data["big_sell"]
             
-            # 嚴格篩選條件：小單淨買超 > 0 AND 大單淨買超 > 0
-            if small_net > 0 and big_net > 0:
+            # 嚴格篩選條件：【成交量 > 1,000 張】 且 【小單淨買超 > 0】 且 【大單淨買超 > 0】
+            if curr_vol > 1000 and small_net > 0 and big_net > 0:
                 matched_results.append({
                     "股票代號": code,
                     "股票名稱": data["name"],
                     "小單淨買超 (張)": small_net,
                     "大單淨買超 (張)": big_net,
-                    "目前成交量 (張)": data["curr_vol"],
-                    "籌碼狀態": "🔥 大小單同步累積買超"
+                    "目前成交量 (張)": curr_vol,
+                    "籌碼狀態": "🔥 大小單同步買超＋熱門量能"
                 })
 
         current_time = datetime.now().strftime("%H:%M:%S")
         status_placeholder.markdown(
             f"**⏰ 全台股掃描時間：** `{current_time}` ｜ "
             f"**全市場監控檔數：** `{len(st.session_state.tab6_full_market)}` 檔 ｜ "
-            f"**符合【大小單同步買超】標的：** `{len(matched_results)}` 檔"
+            f"**符合【量能>1000張 且 大小單買超】標的：** `{len(matched_results)}` 檔"
         )
 
         if matched_results:
@@ -1056,7 +1056,7 @@ with tab6:
             
             table_placeholder.dataframe(df_display, use_container_width=True)
         else:
-            table_placeholder.info("⏳ 全台股掃描中，目前尚無標的同時滿足「小單買超 > 0」與「大單買超 > 0」。")
+            table_placeholder.info("⏳ 全台股掃描中，目前尚無標的同時滿足「成交量 > 1000張」、「小單買超 > 0」與「大單買超 > 0」。")
 
         # 自動刷新
         time.sleep(refresh_rate)
