@@ -937,13 +937,13 @@ with tab5:
             st.warning("⚠️ 目前盤面資料中無完全符合此條件的標的，建議可稍微放寬均線距離或 MACD 條件再試試。")
 
 # ==========================================
-# Tab 6: 盤中即時大/小單同步買超自動監測 (修改後)
+# Tab 6: 全台股盤中多方動能強勢股監測 (大小單同步買超 + 成交量>1000張)
 # ==========================================
 with tab6:
-    st.subheader("🌐 全台股即時大/小單同步買超監測")
-    st.caption("📌 監控範圍：全台股上市櫃標的 ｜ 篩選條件：【目前成交量 > 1,000張】＋【小單累計買超 > 0】＋【大單累計買超 > 0】")
+    st.subheader("🌐 全台股盤中多方動能強勢股監測")
+    st.caption("📌 篩選門檻：【目前成交量 > 1,000張】＋【小單累計買超 > 0】＋【大單累計買超 > 0】")
 
-    # 1. 建立/初始化全台股資料庫 (模擬全台股 1,000+ 檔股票清單)
+    # 1. 初始化全台股資料庫 (涵蓋上市櫃熱門與精選標的)
     @st.cache_data
     def generate_tw_stock_universe():
         base_stocks = [
@@ -962,20 +962,20 @@ with tab6:
 
     stock_universe = generate_tw_stock_universe()
 
-    # 初始化盤中全市場統計資料庫
+    # 初始化 Session State 盤中市場資料
     if "tab6_full_market" not in st.session_state:
         st.session_state.tab6_full_market = {}
         for code, name in stock_universe:
             st.session_state.tab6_full_market[code] = {
                 "name": name,
-                "curr_vol": random.randint(100, 15000), # 目前累計成交量 (含小於與大於1000張)
+                "curr_vol": random.randint(100, 15000), # 累計成交量
                 "small_buy": random.randint(50, 500),
                 "small_sell": random.randint(50, 500),
                 "big_buy": random.randint(100, 2000),
                 "big_sell": random.randint(100, 2000)
             }
 
-    # 2. 全台股即時 Tick 撮合模擬器 (每輪隨機撮合 15~30 檔股票)
+    # 2. 全台股即時 Tick 撮合模擬器
     def simulate_full_market_ticks():
         all_codes = list(st.session_state.tab6_full_market.keys())
         active_symbols = random.sample(all_codes, k=random.randint(15, 30))
@@ -984,10 +984,10 @@ with tab6:
             vol = random.randint(1, 200)
             is_buy = random.choice([True, False]) # 外盤買入 vs 內盤賣出
             
-            # 累計總成交量
+            # 累計成交量
             st.session_state.tab6_full_market[sym]["curr_vol"] += vol
             
-            # 分流大單與小單 (以 15 張為界)
+            # 分流大單與小單 (以 15 張為分界)
             if vol < 15: # 小單
                 if is_buy:
                     st.session_state.tab6_full_market[sym]["small_buy"] += vol
@@ -1014,7 +1014,6 @@ with tab6:
     table_placeholder = st.empty()
 
     if run_monitor:
-        # 進行全市場動態 Tick 模擬更新
         simulate_full_market_ticks()
         
         matched_results = []
@@ -1025,7 +1024,7 @@ with tab6:
             small_net = data["small_buy"] - data["small_sell"]
             big_net = data["big_buy"] - data["big_sell"]
             
-            # 嚴格篩選條件：【成交量 > 1,000 張】 且 【小單淨買超 > 0】 且 【大單淨買超 > 0】
+            # 三重嚴格過濾：成交量 > 1000 且 大小單皆累計淨買超
             if curr_vol > 1000 and small_net > 0 and big_net > 0:
                 matched_results.append({
                     "股票代號": code,
@@ -1033,14 +1032,14 @@ with tab6:
                     "小單淨買超 (張)": small_net,
                     "大單淨買超 (張)": big_net,
                     "目前成交量 (張)": curr_vol,
-                    "籌碼狀態": "🔥 大小單同步買超＋熱門量能"
+                    "籌碼強勢訊號": "🔥 多頭強勢 (大小單同步卡位)"
                 })
 
         current_time = datetime.now().strftime("%H:%M:%S")
         status_placeholder.markdown(
             f"**⏰ 全台股掃描時間：** `{current_time}` ｜ "
             f"**全市場監控檔數：** `{len(st.session_state.tab6_full_market)}` 檔 ｜ "
-            f"**符合【量能>1000張 且 大小單買超】標的：** `{len(matched_results)}` 檔"
+            f"**符合多方強勢標的：** `{len(matched_results)}` 檔"
         )
 
         if matched_results:
@@ -1058,7 +1057,6 @@ with tab6:
         else:
             table_placeholder.info("⏳ 全台股掃描中，目前尚無標的同時滿足「成交量 > 1000張」、「小單買超 > 0」與「大單買超 > 0」。")
 
-        # 自動刷新
         time.sleep(refresh_rate)
         st.rerun()
     else:
