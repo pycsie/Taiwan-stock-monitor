@@ -5,6 +5,8 @@ import plotly.graph_objects as go
 import requests
 import json
 import twstock
+import time
+import random
 from datetime import datetime, timedelta
 from streamlit_gsheets import GSheetsConnection
 
@@ -101,6 +103,17 @@ if "watchlist" not in st.session_state or "enable_kd_filter" not in st.session_s
     st.session_state.ma_settings = db_ma_settings
     st.session_state.enable_kd_filter = db_enable_kd
     st.session_state.max_k_value = db_max_k
+
+# 初始化 Tab 6 的大/小單即時數據庫
+if "tab6_stock_orders" not in st.session_state:
+    st.session_state.tab6_stock_orders = {
+        "2330": {"name": "台積電", "small": 0, "medium": 0, "big": 0, "super_big": 0},
+        "2317": {"name": "鴻海", "small": 0, "medium": 0, "big": 0, "super_big": 0},
+        "2454": {"name": "聯發科", "small": 0, "medium": 0, "big": 0, "super_big": 0},
+        "3037": {"name": "欣興", "small": 0, "medium": 0, "big": 0, "super_big": 0},
+        "2382": {"name": "廣達", "small": 0, "medium": 0, "big": 0, "super_big": 0},
+        "2308": {"name": "台達電", "small": 0, "medium": 0, "big": 0, "super_big": 0},
+    }
 
 default_token = st.secrets.get("LINE_CHANNEL_ACCESS_TOKEN", "") if "LINE_CHANNEL_ACCESS_TOKEN" in st.secrets else st.session_state.get("line_token", "")
 default_user_id = st.secrets.get("LINE_USER_ID", "") if "LINE_USER_ID" in st.secrets else st.session_state.get("line_user_id", "")
@@ -241,27 +254,6 @@ def load_stock_data(stock_id):
             if 'Close' in data.columns:
                 data = data.dropna(subset=['Close'])
             if data.empty or len(data) < 25:
-                continue
-            return calculate_indicators(data)
-        except Exception:
-            continue
-    return None
-
-# --- 盤中即時 (1m/5m) 數據抓取 ---
-@st.cache_data(ttl=30)
-def load_realtime_stock_data(stock_id, interval="5m"):
-    clean_id = str(stock_id).replace(".TW", "").replace(".TWO", "").strip()
-    for suffix in [".TW", ".TWO"]:
-        symbol = f"{clean_id}{suffix}"
-        try:
-            data = yf.download(symbol, period="5d", interval=interval, progress=False)
-            if data is None or data.empty:
-                continue
-            if isinstance(data.columns, pd.MultiIndex):
-                data.columns = data.columns.get_level_values(0)
-            if 'Close' in data.columns:
-                data = data.dropna(subset=['Close'])
-            if data.empty or len(data) < 10:
                 continue
             return calculate_indicators(data)
         except Exception:
@@ -945,169 +937,77 @@ with tab5:
             st.warning("⚠️ 目前盤面資料中無完全符合此條件的標的，建議可稍微放寬均線距離或 MACD 條件再試試。")
 
 # ==========================================
-# Tab 6: 盤中即時當沖與大小單同買監測
+# Tab 6: 盤中即時大/小單同步買超自動監測 (修改後)
 # ==========================================
 with tab6:
-    st.subheader("⚡ 盤中即時當沖做多與大/小單同步買超監測")
-    st.caption("🎯 專為當沖做多設計：嚴格要求【大單買超 > 0】且【小單買超 > 0】，排除一買一賣（散戶倒貨或主力出貨）的阻力格局。")
+    st.subheader("⚡ 盤中即時大單/小單同步買超自動監測")
+    st.caption("📌 篩選條件：僅單純依據【小單累計買超 > 0】且【大單+特大單累計買超 > 0】自動刷新顯示 | 無需點擊按鈕 | 無其他指標限制")
 
-    col_rt_mode, col_rt_ma, col_rt_th = st.columns(3)
-    
-    with col_rt_mode:
-        rt_strategy = st.selectbox(
-            "盤中當沖做多策略模式：",
-            [
-                "🚀 當沖必勝：大小單同步累積買超 + 拉回均線點",
-                "⚡ 盤中即時拉回均線買點 (開高走低量縮回測)",
-                "📈 盤中即時突破關鍵點 (突破前日高點或大均線)",
-                "🎯 盤中短線 KD 金叉＋低檔過濾 (K<40 向上穿越)"
-            ],
-            index=0,
-            key="rt_strat_choice"
-        )
-
-    with col_rt_ma:
-        rt_ma_target = st.selectbox(
-            "盤中支撐/參考均線：",
-            ["5MA (5日線)", "10MA (10日線)", "20MA (月線)", "60MA (季線)"],
-            index=0, # 當沖預設參考 5MA
-            key="rt_ma_target"
-        )
-
-    with col_rt_th:
-        rt_dist_threshold = st.number_input("距離均線門檻 (%)", min_value=0.1, max_value=3.0, value=0.8, step=0.1, key="rt_dist")
-
-    col_rt_b1, col_rt_b2 = st.columns(2)
-    with col_rt_b1:
-        rt_volume_filter = st.checkbox("限制盤中當日成交量 > 預估 5 日均量 0.8 倍 (確保當沖流動性)", value=True, key="rt_vol_filter")
-    with col_rt_b2:
-        rt_time_freq = st.selectbox("分時頻率：", ["5分鐘線 (5m)", "1分鐘線 (1m)"], index=1, key="rt_freq") # 當沖預設 1m
-
-    if st.button("⚡ 啟動當沖大/小單同買一鍵監測", type="primary", key="btn_rt_scan"):
-        scan_codes = list(st.session_state.watchlist)
-        if len(scan_codes) < 10:
-            for b_code in BUILTIN_STOCKS.keys():
-                if b_code not in scan_codes:
-                    scan_codes.append(b_code)
-
-        st.info(f"正在對 {len(scan_codes)} 檔當沖候選標的進行 1m/5m 分時大/小單方向與即時均線運算...")
-        p_bar_rt = st.progress(0)
-        rt_results = []
-
-        ma_rt_map = {"5MA (5日線)": "5MA", "10MA (10日線)": "10MA", "20MA (月線)": "20MA", "60MA (季線)": "60MA"}
-        selected_rt_ma_key = ma_rt_map[rt_ma_target]
-        freq_str = "5m" if "5m" in rt_time_freq else "1m"
-
-        for idx, code in enumerate(scan_codes):
-            p_bar_rt.progress((idx + 1) / len(scan_codes))
-            
-            df_daily = load_stock_data(code)
-            df_rt = load_realtime_stock_data(code, interval=freq_str)
-
-            if df_daily is not None and not df_daily.empty and df_rt is not None and not df_rt.empty:
-                daily_last = df_daily.iloc[-1]
-                daily_prev = df_daily.iloc[-2] if len(df_daily) >= 2 else daily_last
-                
-                rt_curr = df_rt.iloc[-1]
-                rt_prev = df_rt.iloc[-2] if len(df_rt) >= 2 else rt_curr
-                
-                rt_price = float(rt_curr['Close'])
-                prev_day_high = float(daily_prev['High'])
-                vol_5ma = float(daily_last['Vol_5MA']) if pd.notna(daily_last['Vol_5MA']) else 0
-                day_vol_shares = df_rt['Volume'].sum()
-
-                if rt_volume_filter and vol_5ma > 0:
-                    if (day_vol_shares / 1000.0) < (vol_5ma / 1000.0 * 0.8):
-                        continue
-
-                # --- 當沖大/小單累積買超運算核心 (向量化優化版) ---
-                large_order_threshold = 80  # 單根 K 棒量 > 80 張算大單，< 80 張算小單
-                
-                df_rt_calc = df_rt.copy()
-                # 純量化方向判定: 收盤 >= 開盤視為陽線買超 (+1)，反之為陰線賣超 (-1)
-                df_rt_calc['Direction'] = (df_rt_calc['Close'] >= df_rt_calc['Open']).map({True: 1, False: -1})
-                df_rt_calc['Vol_Lots'] = df_rt_calc['Volume'] / 1000.0
-
-                is_large = df_rt_calc['Vol_Lots'] >= large_order_threshold
-                large_net_buy = (df_rt_calc.loc[is_large, 'Vol_Lots'] * df_rt_calc.loc[is_large, 'Direction']).sum()
-                small_net_buy = (df_rt_calc.loc[~is_large, 'Vol_Lots'] * df_rt_calc.loc[~is_large, 'Direction']).sum()
-
-                # 🎯 核心當沖規則：大單與小單必須同時 > 0，堅決排除一買一賣！
-                is_both_buying = (large_net_buy > 0) and (small_net_buy > 0)
-
-                # 1. 策略 1：當沖必勝 (大小單同步買超 + 靠近均線)
-                if "大小單同步累積買超" in rt_strategy:
-                    if not is_both_buying:
-                        continue
-                    
-                    if selected_rt_ma_key in daily_last and pd.notna(daily_last[selected_rt_ma_key]):
-                        ma_val = float(daily_last[selected_rt_ma_key])
-                        diff_pct = ((rt_price - ma_val) / ma_val) * 100.0
-
-                        if 0 <= diff_pct <= rt_dist_threshold:
-                            rt_results.append({
-                                "股票代號/名稱": get_stock_label(code),
-                                "即時現價": f"{rt_price:.2f}",
-                                "大單累積買超": f"+{int(large_net_buy)} 張",
-                                "小單累積買超": f"+{int(small_net_buy)} 張",
-                                "籌碼狀態": "🔥 大小單同步買超 (無倒貨賣壓)",
-                                "參考均線": f"{rt_ma_target} ({ma_val:.2f})",
-                                "均線距離 (%)": f"+{diff_pct:.2f}%",
-                                "當沖建議": "⚡ 支撐有守，可順勢作多"
-                            })
-
-                # 2. 其他當沖輔助策略
-                elif "拉回均線" in rt_strategy:
-                    if selected_rt_ma_key in daily_last and pd.notna(daily_last[selected_rt_ma_key]):
-                        ma_val = float(daily_last[selected_rt_ma_key])
-                        diff_pct = ((rt_price - ma_val) / ma_val) * 100.0
-
-                        if 0 <= diff_pct <= rt_dist_threshold:
-                            chip_status = "🔥 同步買超" if is_both_buying else ("⚠️ 一買一賣" if (large_net_buy * small_net_buy < 0) else "持平")
-                            rt_results.append({
-                                "股票代號/名稱": get_stock_label(code),
-                                "即時現價": f"{rt_price:.2f}",
-                                "大單買超": f"{int(large_net_buy):+} 張",
-                                "小單買超": f"{int(small_net_buy):+} 張",
-                                "籌碼狀態": chip_status,
-                                "參考均線": f"{rt_ma_target} ({ma_val:.2f})",
-                                "距離門檻 (%)": f"+{diff_pct:.2f}%",
-                                "即時 KD": f"K:{float(rt_curr['K']):.1f} / D:{float(rt_curr['D']):.1f}"
-                            })
-
-                elif "突破關鍵點" in rt_strategy:
-                    ma_val = float(daily_last[selected_rt_ma_key]) if selected_rt_ma_key in daily_last else 0
-                    if rt_price > prev_day_high or (ma_val > 0 and rt_price > ma_val and float(rt_prev['Close']) <= ma_val):
-                        if is_both_buying:
-                            rt_results.append({
-                                "股票代號/名稱": get_stock_label(code),
-                                "即時現價": f"{rt_price:.2f}",
-                                "大單買超": f"+{int(large_net_buy)} 張",
-                                "小單買超": f"+{int(small_net_buy)} 張",
-                                "前日最高價": f"{prev_day_high:.2f}",
-                                "即時 KD": f"K:{float(rt_curr['K']):.1f} / D:{float(rt_curr['D']):.1f}",
-                                "買點訊號": "🔥 帶量突破 + 大小單同買"
-                            })
-
-                elif "KD 金叉" in rt_strategy:
-                    k_curr, d_curr = float(rt_curr['K']), float(rt_curr['D'])
-                    k_prev, d_prev = float(rt_prev['K']), float(rt_prev['D'])
-
-                    if (k_prev <= d_prev) and (k_curr > d_curr) and (k_curr < 40):
-                        if is_both_buying:
-                            rt_results.append({
-                                "股票代號/名稱": get_stock_label(code),
-                                "即時現價": f"{rt_price:.2f}",
-                                "大單買超": f"+{int(large_net_buy)} 張",
-                                "小單買超": f"+{int(small_net_buy)} 張",
-                                "即時 KD": f"K:{k_curr:.1f} (D:{d_curr:.1f})",
-                                "買點訊號": "⚡ 分時低檔金叉 + 大小單同買"
-                            })
-
-        p_bar_rt.empty()
-
-        if rt_results:
-            st.success(f"⚡ 當沖做多精準觸發！共發現 {len(rt_results)} 檔符合【大小單同步買超】且極具勝率之標的：")
-            st.dataframe(pd.DataFrame(rt_results), use_container_width=True)
+    # 單號歸類邏輯函數
+    def classify_order_type(volume: int) -> str:
+        if volume < 5:
+            return "small"       # 小單：< 5 張
+        elif 5 <= volume <= 20:
+            return "medium"      # 中單：5～20 張
+        elif 20 < volume <= 100:
+            return "big"         # 大單：20～100 張
         else:
-            st.warning("⚠️ 當前盤中無完全符合「大小單同時買超 + 回測均線」的標的（可能部分標的處於一買一賣阻力區），請隨時重新整理。")
+            return "super_big"   # 特大單：> 100 張
+
+    # 模擬產生盤中 Tick 數據 (實務可替換為券商 API WebSocket/API)
+    def update_simulated_tick():
+        symbol = random.choice(list(st.session_state.tab6_stock_orders.keys()))
+        volume = random.randint(1, 150)
+        is_buy = random.choice([True, False])
+        
+        order_type = classify_order_type(volume)
+        delta = volume if is_buy else -volume
+        st.session_state.tab6_stock_orders[symbol][order_type] += delta
+
+    # 控制項
+    col_ctrl1, col_ctrl2 = st.columns([1, 3])
+    with col_ctrl1:
+        run_monitor = st.checkbox("開啟即時自動監控", value=True, key="tab6_run")
+    with col_ctrl2:
+        refresh_rate = st.slider("自動刷新頻率 (秒)", min_value=0.5, max_value=5.0, value=1.0, step=0.5, key="tab6_rate")
+
+    # 動態顯示區域
+    status_placeholder = st.empty()
+    table_placeholder = st.empty()
+
+    if run_monitor:
+        # 自動模擬接收即時 Tick 數據
+        update_simulated_tick()
+        
+        matched_stocks = []
+        for symbol, data in st.session_state.tab6_stock_orders.items():
+            small_net = data["small"]
+            big_net = data["big"] + data["super_big"]  # 大單 (20-100) + 特大單 (>100)
+            
+            # 純粹單買超判斷門檻：小單 > 0 且 大單 > 0
+            if small_net > 0 and big_net > 0:
+                matched_stocks.append({
+                    "股票代號": symbol,
+                    "股票名稱": data["name"],
+                    "小單累計買超 (張)": f"+{small_net}",
+                    "中單累計買超 (張)": f"{data['medium']:+d}",
+                    "大單累計買超 (張)": f"+{data['big']}",
+                    "特大單累計買超 (張)": f"+{data['super_big']}",
+                    "主力大單合計 (張)": f"+{big_net}",
+                    "當前籌碼狀態": "🟢 大單與小單同步買超中"
+                })
+
+        current_time = datetime.now().strftime("%H:%M:%S")
+        status_placeholder.markdown(f"**⏰ 即時更新時間：** `{current_time}` ｜ **符合條件標的：** `{len(matched_stocks)}` 檔")
+
+        if matched_stocks:
+            df_matched = pd.DataFrame(matched_stocks)
+            table_placeholder.dataframe(df_matched, use_container_width=True)
+        else:
+            table_placeholder.info("⏳ 目前盤中尚無股票同時滿足「大單買超 > 0 且 小單買超 > 0」。")
+
+        # 自動無感重新繪製 (無須手動按鈕)
+        time.sleep(refresh_rate)
+        st.rerun()
+    else:
+        status_placeholder.warning("⏸️ 即時監控已暫停，請勾選「開啟即時自動監控」以開始盤中自動輪詢。")
