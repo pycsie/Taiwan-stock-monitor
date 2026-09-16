@@ -937,127 +937,424 @@ with tab5:
             st.warning("⚠️ 目前盤面資料中無完全符合此條件的標的，建議可稍微放寬均線距離或 MACD 條件再試試。")
 
 # ==========================================
-# Tab 6: 全台股盤中多方動能強勢股監測 (大小單同步買超 + 成交量>1000張)
+# Tab 6: 全台股盤中即時上漲動能掃描器
 # ==========================================
 with tab6:
-    st.subheader("🌐 全台股盤中多方動能強勢股監測")
-    st.caption("📌 篩選門檻：【目前成交量 > 1,000張】＋【小單累計買超 > 0】＋【大單累計買超 > 0】")
+    st.subheader("⚡ 全台股盤中即時上漲動能掃描器")
+    st.caption(
+        "📌 使用 TWSE MIS 即時行情：找出「正在上漲 + 短線價格加速 + 成交量放大 + "
+        "接近日內高點」的股票；不再使用隨機模擬資料。"
+    )
 
-    # 1. 初始化全台股資料庫 (涵蓋上市櫃熱門與精選標的)
-    @st.cache_data
+    # ---------------------------------------------------------
+    # 1. 全市場股票代碼
+    # ---------------------------------------------------------
+    @st.cache_data(ttl=86400)
     def generate_tw_stock_universe():
-        base_stocks = [
-            ("2330", "台積電"), ("2317", "鴻海"), ("2454", "聯發科"), ("2382", "廣達"),
-            ("3037", "欣興"), ("8046", "南電"), ("3189", "景碩"), ("2308", "台達電"),
-            ("3231", "緯創"), ("2356", "英業達"), ("2376", "技嘉"), ("2377", "微星"),
-            ("2603", "長榮"), ("2609", "陽明"), ("2615", "萬海"), ("2881", "富邦金"),
-            ("2882", "國泰金"), ("2303", "聯電"), ("3008", "大立光"), ("2327", "國巨"),
-            ("3661", "世芯-KY"), ("3443", "創意"), ("6669", "緯穎"), ("3529", "力旺"),
-            ("6415", "矽力*-KY"), ("2002", "中鋼"), ("1301", "台塑"), ("1302", "台聚"),
-            ("1513", "中興電"), ("1514", "亞力"), ("1519", "華城"), ("1605", "華新")
-        ]
-        for i in range(1001, 1200):
-            base_stocks.append((str(i), f"台股精選-{i}"))
-        return base_stocks
+        # twstock.codes 同時包含上市/上櫃股票；實際市場別交由 MIS API 回傳的 ex 判斷。
+        result = []
+        for code, info in twstock.codes.items():
+            if len(str(code)) == 4 and str(code).isdigit() and getattr(info, "type", "") == "股票":
+                result.append(str(code))
+        return sorted(set(result))
 
     stock_universe = generate_tw_stock_universe()
 
-    # 初始化 Session State 盤中市場資料
-    if "tab6_full_market" not in st.session_state:
-        st.session_state.tab6_full_market = {}
-        for code, name in stock_universe:
-            st.session_state.tab6_full_market[code] = {
-                "name": name,
-                "curr_vol": random.randint(100, 15000), # 累計成交量
-                "small_buy": random.randint(50, 500),
-                "small_sell": random.randint(50, 500),
-                "big_buy": random.randint(100, 2000),
-                "big_sell": random.randint(100, 2000)
-            }
+    # ---------------------------------------------------------
+    # 2. TWSE MIS 即時行情
+    #    一次查多檔，避免逐檔 request。
+    #    MIS 回傳 z=最新成交價、y=昨收、o=開盤、h=最高、v=累計量。
+    # ---------------------------------------------------------
+    @st.cache_data(ttl=3)
+    def fetch_realtime_market_quotes(stock_codes):
+        all_rows = []
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://mis.twse.com.tw/stock/index.jsp",
+        }
 
-    # 2. 全台股即時 Tick 撮合模擬器
-    def simulate_full_market_ticks():
-        all_codes = list(st.session_state.tab6_full_market.keys())
-        active_symbols = random.sample(all_codes, k=random.randint(15, 30))
-        
-        for sym in active_symbols:
-            vol = random.randint(1, 200)
-            is_buy = random.choice([True, False]) # 外盤買入 vs 內盤賣出
-            
-            # 累計成交量
-            st.session_state.tab6_full_market[sym]["curr_vol"] += vol
-            
-            # 分流大單與小單 (以 15 張為分界)
-            if vol < 15: # 小單
-                if is_buy:
-                    st.session_state.tab6_full_market[sym]["small_buy"] += vol
-                else:
-                    st.session_state.tab6_full_market[sym]["small_sell"] += vol
-            else: # 大單 / 特大單
-                if is_buy:
-                    st.session_state.tab6_full_market[sym]["big_buy"] += vol
-                else:
-                    st.session_state.tab6_full_market[sym]["big_sell"] += vol
+        # 同一代碼同時嘗試 tse / otc，MIS 會只回傳存在的市場。
+        # 控制每次 URL 長度，避免單次 request 過長。
+        chunk_size = 80
 
-    # 控制介面
-    col_ctrl1, col_ctrl2, col_ctrl3 = st.columns([1, 1, 2])
+        for i in range(0, len(stock_codes), chunk_size):
+            chunk = stock_codes[i:i + chunk_size]
+            ex_ch = "|".join(
+                [f"tse_{c}.tw" for c in chunk] +
+                [f"otc_{c}.tw" for c in chunk]
+            )
+
+            url = (
+                "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
+                f"?ex_ch={ex_ch}&json=1&delay=0"
+            )
+
+            try:
+                response = requests.get(url, headers=headers, timeout=8)
+                response.raise_for_status()
+                payload = response.json()
+
+                for row in payload.get("msgArray", []):
+                    if not row.get("c"):
+                        continue
+                    all_rows.append(row)
+
+            except Exception:
+                # 單一批次失敗不影響其他批次
+                continue
+
+        if not all_rows:
+            return pd.DataFrame()
+
+        rows = []
+        seen = set()
+
+        for r in all_rows:
+            code = str(r.get("c", "")).strip()
+            if not code or code in seen:
+                continue
+            seen.add(code)
+
+            def to_float(v):
+                try:
+                    if v in (None, "", "-", "--"):
+                        return None
+                    return float(str(v).replace(",", ""))
+                except Exception:
+                    return None
+
+            def to_int(v):
+                try:
+                    if v in (None, "", "-", "--"):
+                        return 0
+                    return int(float(str(v).replace(",", "")))
+                except Exception:
+                    return 0
+
+            price = to_float(r.get("z"))
+            prev_close = to_float(r.get("y"))
+            open_price = to_float(r.get("o"))
+            high_price = to_float(r.get("h"))
+            low_price = to_float(r.get("l"))
+            upper_limit = to_float(r.get("u"))
+            total_vol = to_int(r.get("v"))
+            tick_vol = to_int(r.get("tv"))
+
+            if price is None or prev_close is None or prev_close <= 0:
+                continue
+
+            rows.append({
+                "code": code,
+                "name": r.get("n", code),
+                "exchange": r.get("ex", ""),
+                "price": price,
+                "prev_close": prev_close,
+                "open": open_price,
+                "high": high_price,
+                "low": low_price,
+                "upper_limit": upper_limit,
+                "volume": total_vol / 1000.0,       # 張
+                "tick_volume": tick_vol / 1000.0,   # 張
+                "trade_time": r.get("t", ""),
+                "update_ms": r.get("tlong", ""),
+            })
+
+        return pd.DataFrame(rows)
+
+    # ---------------------------------------------------------
+    # 3. Session State：保留最近幾次即時價格，用來判斷「加速」
+    # ---------------------------------------------------------
+    if "tab6_realtime_history" not in st.session_state:
+        st.session_state.tab6_realtime_history = {}
+
+    if "tab6_last_scan_time" not in st.session_state:
+        st.session_state.tab6_last_scan_time = None
+
+    if "tab6_last_quotes" not in st.session_state:
+        st.session_state.tab6_last_quotes = pd.DataFrame()
+
+    # ---------------------------------------------------------
+    # 4. 掃描條件
+    # ---------------------------------------------------------
+    col1, col2, col3, col4 = st.columns(4)
+
+    with col1:
+        min_gain = st.number_input(
+            "最低漲幅 (%)",
+            min_value=0.1,
+            max_value=9.9,
+            value=1.0,
+            step=0.1,
+            key="tab6_min_gain"
+        )
+
+    with col2:
+        min_volume = st.number_input(
+            "最低成交量 (張)",
+            min_value=100,
+            max_value=100000,
+            value=1000,
+            step=100,
+            key="tab6_min_volume"
+        )
+
+    with col3:
+        min_turnover = st.number_input(
+            "最低成交金額 (億)",
+            min_value=0.1,
+            max_value=100.0,
+            value=1.0,
+            step=0.5,
+            key="tab6_min_turnover"
+        )
+
+    with col4:
+        range_position = st.slider(
+            "日內高點位置 (%)",
+            min_value=50,
+            max_value=100,
+            value=70,
+            step=5,
+            key="tab6_range_position"
+        )
+
+    col5, col6, col7 = st.columns(3)
+
+    with col5:
+        min_accel = st.number_input(
+            "短線價格加速門檻 (%)",
+            min_value=0.01,
+            max_value=3.0,
+            value=0.15,
+            step=0.05,
+            help="比較本次與約 30 秒前的價格；第一次掃描尚無歷史價格時，不以此條件剔除。",
+            key="tab6_min_accel"
+        )
+
+    with col6:
+        require_above_open = st.checkbox(
+            "股價必須站上開盤價",
+            value=True,
+            key="tab6_above_open"
+        )
+
+    with col7:
+        top_n = st.number_input(
+            "最多顯示",
+            min_value=5,
+            max_value=100,
+            value=30,
+            step=5,
+            key="tab6_top_n"
+        )
+
+    col_ctrl1, col_ctrl2 = st.columns([1, 2])
+
     with col_ctrl1:
-        run_monitor = st.checkbox("開啟全台股即時監控", value=True, key="tab6_run_full")
+        run_monitor = st.checkbox(
+            "開啟盤中即時監控",
+            value=True,
+            key="tab6_run_realtime"
+        )
+
     with col_ctrl2:
-        refresh_rate = st.slider("掃描頻率 (秒)", min_value=0.5, max_value=5.0, value=1.0, step=0.5, key="tab6_rate_full")
-    with col_ctrl3:
-        if st.button("🔄 重置盤中累計數據", key="tab6_reset_full"):
-            del st.session_state.tab6_full_market
-            st.rerun()
+        refresh_rate = st.slider(
+            "更新秒數",
+            min_value=3.0,
+            max_value=15.0,
+            value=5.0,
+            step=1.0,
+            key="tab6_refresh_rate"
+        )
+
+    if st.button("🔄 清除盤中動能歷史", key="tab6_reset_realtime"):
+        st.session_state.tab6_realtime_history = {}
+        st.session_state.tab6_last_quotes = pd.DataFrame()
+        st.success("已清除盤中動能歷史，下一輪重新建立基準。")
+        st.rerun()
 
     status_placeholder = st.empty()
     table_placeholder = st.empty()
 
+    # ---------------------------------------------------------
+    # 5. 即時掃描
+    # ---------------------------------------------------------
     if run_monitor:
-        simulate_full_market_ticks()
-        
-        matched_results = []
+        with st.spinner("正在取得全市場即時行情..."):
+            quotes = fetch_realtime_market_quotes(tuple(stock_universe))
 
-        # 廣域掃描全市場所有標的
-        for code, data in st.session_state.tab6_full_market.items():
-            curr_vol = data["curr_vol"]
-            small_net = data["small_buy"] - data["small_sell"]
-            big_net = data["big_buy"] - data["big_sell"]
-            
-            # 三重嚴格過濾：成交量 > 1000 且 大小單皆累計淨買超
-            if curr_vol > 1000 and small_net > 0 and big_net > 0:
+        if quotes.empty:
+            status_placeholder.error(
+                "❌ 無法取得 TWSE MIS 即時行情。可能是非交易時段、API 暫時無回應，或網路連線問題。"
+            )
+        else:
+            now = datetime.now()
+
+            # 建立/更新價格歷史。
+            # history[code] = [(timestamp, price, volume), ...]
+            for _, row in quotes.iterrows():
+                code = row["code"]
+                price = float(row["price"])
+                volume = float(row["volume"])
+
+                history = st.session_state.tab6_realtime_history.setdefault(code, [])
+                history.append((now, price, volume))
+
+                # 最多保留 3 分鐘
+                cutoff = now - timedelta(seconds=180)
+                history[:] = [x for x in history if x[0] >= cutoff]
+
+            matched_results = []
+
+            for _, row in quotes.iterrows():
+                code = row["code"]
+                name = row["name"]
+
+                price = float(row["price"])
+                prev_close = float(row["prev_close"])
+                open_price = row["open"]
+                high_price = row["high"]
+                low_price = row["low"]
+                volume = float(row["volume"])
+
+                if prev_close <= 0 or price <= 0:
+                    continue
+
+                change_pct = (price - prev_close) / prev_close * 100.0
+
+                # 成交金額
+                turnover_yi = price * volume * 1000 / 100_000_000
+
+                # 日內位置：0 = 接近日低，100 = 接近日高
+                day_range_position = 50.0
+                if (
+                    high_price is not None
+                    and low_price is not None
+                    and high_price > low_price
+                ):
+                    day_range_position = (
+                        (price - low_price) / (high_price - low_price) * 100.0
+                    )
+
+                # 約 30 秒前價格
+                history = st.session_state.tab6_realtime_history.get(code, [])
+                old_price = None
+
+                for ts, hist_price, hist_volume in reversed(history):
+                    if (now - ts).total_seconds() >= 25:
+                        old_price = hist_price
+                        break
+
+                accel_pct = None
+                if old_price is not None and old_price > 0:
+                    accel_pct = (price - old_price) / old_price * 100.0
+
+                # 近期成交量增量：用歷史快照估算最近一段時間的成交速度
+                volume_speed = None
+                if len(history) >= 2:
+                    old_ts, old_p, old_v = history[-2]
+                    dt_sec = max((now - old_ts).total_seconds(), 1)
+                    dv = max(volume - old_v, 0)
+                    volume_speed = dv / dt_sec * 60.0  # 張/分鐘
+
+                # 核心條件
+                cond_gain = change_pct >= min_gain
+                cond_volume = volume >= min_volume
+                cond_turnover = turnover_yi >= min_turnover
+                cond_range = day_range_position >= range_position
+                cond_open = (
+                    True
+                    if not require_above_open
+                    else (open_price is not None and price > float(open_price))
+                )
+
+                # 第一次建立歷史時，不因 accel 尚未存在而直接排除。
+                cond_accel = (
+                    True
+                    if accel_pct is None
+                    else accel_pct >= min_accel
+                )
+
+                if not all([
+                    cond_gain,
+                    cond_volume,
+                    cond_turnover,
+                    cond_range,
+                    cond_open,
+                    cond_accel
+                ]):
+                    continue
+
+                # 動能分數：不是預測，而是把目前已觀察到的強弱排序。
+                score = 0.0
+                score += min(change_pct / 3.0, 1.0) * 30
+                score += min(max(accel_pct or 0, 0) / 0.5, 1.0) * 25
+                score += min(day_range_position / 100.0, 1.0) * 20
+                score += min(volume / max(min_volume * 3, 1), 1.0) * 15
+                score += min(turnover_yi / max(min_turnover * 5, 0.1), 1.0) * 10
+
+                signal = "🔥 強勢加速"
+                if accel_pct is None:
+                    signal = "🟡 首次偵測"
+                elif accel_pct >= 0.5 and change_pct >= 2:
+                    signal = "🚀 強勢上攻"
+                elif change_pct >= 1 and day_range_position >= 85:
+                    signal = "⚡ 高檔續強"
+
                 matched_results.append({
-                    "股票代號": code,
-                    "股票名稱": data["name"],
-                    "小單淨買超 (張)": small_net,
-                    "大單淨買超 (張)": big_net,
-                    "目前成交量 (張)": curr_vol,
-                    "籌碼強勢訊號": "🔥 多頭強勢 (大小單同步卡位)"
+                    "股票": f"{name} ({code})",
+                    "現價": f"{price:.2f}",
+                    "漲幅": f"{change_pct:+.2f}%",
+                    "30秒動能": (
+                        f"{accel_pct:+.2f}%" if accel_pct is not None else "-"
+                    ),
+                    "日內高點位置": f"{day_range_position:.0f}%",
+                    "成交量(張)": int(volume),
+                    "成交金額(億)": f"{turnover_yi:.2f}",
+                    "開盤價": f"{float(open_price):.2f}" if open_price is not None else "-",
+                    "最近成交": row["trade_time"] or "-",
+                    "動能訊號": signal,
+                    "動能分數": round(score, 1),
+                    "_score": score,
                 })
 
-        current_time = datetime.now().strftime("%H:%M:%S")
-        status_placeholder.markdown(
-            f"**⏰ 全台股掃描時間：** `{current_time}` ｜ "
-            f"**全市場監控檔數：** `{len(st.session_state.tab6_full_market)}` 檔 ｜ "
-            f"**符合多方強勢標的：** `{len(matched_results)}` 檔"
-        )
+            current_time = datetime.now().strftime("%H:%M:%S")
+            status_placeholder.markdown(
+                f"**⏰ 即時掃描：** `{current_time}` ｜ "
+                f"**取得行情：** `{len(quotes)}` 檔 ｜ "
+                f"**符合上漲動能：** `{len(matched_results)}` 檔 ｜ "
+                f"**更新頻率：** `{refresh_rate:.0f} 秒`"
+            )
 
-        if matched_results:
-            # 轉為 DataFrame 並依「大單淨買超」由大到小排序
-            df_matched = pd.DataFrame(matched_results)
-            df_matched = df_matched.sort_values(by="大單淨買超 (張)", ascending=False)
-            
-            # 格式化顯示欄位
-            df_display = df_matched.copy()
-            df_display["小單淨買超 (張)"] = df_display["小單淨買超 (張)"].apply(lambda x: f"+{x:,}")
-            df_display["大單淨買超 (張)"] = df_display["大單淨買超 (張)"].apply(lambda x: f"+{x:,}")
-            df_display["目前成交量 (張)"] = df_display["目前成交量 (張)"].apply(lambda x: f"{x:,}")
-            
-            table_placeholder.dataframe(df_display, use_container_width=True)
-        else:
-            table_placeholder.info("⏳ 全台股掃描中，目前尚無標的同時滿足「成交量 > 1000張」、「小單買超 > 0」與「大單買超 > 0」。")
+            if matched_results:
+                result_df = pd.DataFrame(matched_results)
+                result_df = (
+                    result_df
+                    .sort_values("_score", ascending=False)
+                    .head(int(top_n))
+                    .drop(columns=["_score"])
+                )
+
+                table_placeholder.dataframe(
+                    result_df,
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+                st.info(
+                    "📌 排序邏輯：漲幅、短線價格加速、日內高點位置、成交量與成交金額綜合計算。"
+                    "「動能分數」只是盤中強弱排序，不代表未來一定上漲。"
+                )
+            else:
+                table_placeholder.info(
+                    "⏳ 目前沒有股票同時符合設定的「漲幅＋成交量＋成交金額＋日內位置＋短線動能」條件。"
+                )
 
         time.sleep(refresh_rate)
         st.rerun()
+
     else:
-        status_placeholder.warning("⏸️ 即時監控已暫停，請勾選「開啟全台股即時監控」進行全市場掃描。")
+        status_placeholder.warning(
+            "⏸️ 盤中即時監控已暫停，勾選「開啟盤中即時監控」即可開始掃描。"
+        )
+
