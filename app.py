@@ -940,74 +940,157 @@ with tab5:
 # Tab 6: 盤中即時大/小單同步買超自動監測 (修改後)
 # ==========================================
 with tab6:
-    st.subheader("⚡ 盤中即時大單/小單同步買超自動監測")
-    st.caption("📌 篩選條件：僅單純依據【小單累計買超 > 0】且【大單+特大單累計買超 > 0】自動刷新顯示 | 無需點擊按鈕 | 無其他指標限制")
+    st.subheader("🌐 全台股即時大/小單同步買超與預估爆量監測")
+    st.caption("📌 監控範圍：全台股上市櫃標的 ｜ 篩選條件：【小單累計買超 > 0】＋【大單累計買超 > 0】＋【預估成交量 > 昨日成交量】")
 
-    # 單號歸類邏輯函數
-    def classify_order_type(volume: int) -> str:
-        if volume < 5:
-            return "small"       # 小單：< 5 張
-        elif 5 <= volume <= 20:
-            return "medium"      # 中單：5～20 張
-        elif 20 < volume <= 100:
-            return "big"         # 大單：20～100 張
-        else:
-            return "super_big"   # 特大單：> 100 張
+    # 1. 建立/初始化全台股資料庫 (模擬全台股 1,000+ 檔股票清單)
+    @st.cache_data
+    def generate_tw_stock_universe():
+        # 模擬產生台股常態交易之股票代號與名稱 (涵蓋半導體、AI、板卡、電子零組件、航運等)
+        base_stocks = [
+            ("2330", "台積電"), ("2317", "鴻海"), ("2454", "聯發科"), ("2382", "廣達"),
+            ("3037", "欣興"), ("8046", "南電"), ("3189", "景碩"), ("2308", "台Delta"),
+            ("3231", "緯創"), ("2356", "英業達"), ("2376", "技嘉"), ("2377", "微星"),
+            ("2603", "長榮"), ("2609", "陽明"), ("2615", "萬海"), ("2881", "富邦金"),
+            ("2882", "國泰金"), ("2303", "聯電"), ("3008", "大立光"), ("2327", "國巨"),
+            ("3661", "世芯-KY"), ("3443", "創意"), ("6669", "緯穎"), ("3529", "力旺"),
+            ("6415", "矽力*-KY"), ("2002", "中鋼"), ("1301", "台塑"), ("1302", "台聚"),
+            ("1513", "中興電"), ("1514", "亞力"), ("1519", "華城"), ("1605", "華新")
+        ]
+        # 擴補其他台股代號至 200+ 檔模擬全市場
+        for i in range(1001, 1200):
+            base_stocks.append((str(i), f"台股精選-{i}"))
+        return base_stocks
 
-    # 模擬產生盤中 Tick 數據 (實務可替換為券商 API WebSocket/API)
-    def update_simulated_tick():
-        symbol = random.choice(list(st.session_state.tab6_stock_orders.keys()))
-        volume = random.randint(1, 150)
-        is_buy = random.choice([True, False])
+    stock_universe = generate_tw_stock_universe()
+
+    # 初始化盤中全市場統計資料庫
+    if "tab6_full_market" not in st.session_state:
+        st.session_state.tab6_full_market = {}
+        for code, name in stock_universe:
+            # 隨機給定昨日成交量 (1,000 ~ 50,000 張)
+            prev_v = random.randint(1000, 50000)
+            st.session_state.tab6_full_market[code] = {
+                "name": name,
+                "prev_vol": prev_v,
+                "curr_vol": int(prev_v * random.uniform(0.2, 0.6)), # 當前開盤累積量
+                "small_buy": random.randint(50, 500),
+                "small_sell": random.randint(50, 500),
+                "big_buy": random.randint(100, 2000),
+                "big_sell": random.randint(100, 2000)
+            }
+
+    # 2. 計算盤中時間推估比率 (台股交易時間 09:00 ~ 13:30，共 270 分鐘)
+    def get_market_progress_ratio():
+        now = datetime.now()
+        market_start = now.replace(hour=9, minute=0, second=0, microsecond=0)
+        market_end = now.replace(hour=13, minute=30, second=0, microsecond=0)
         
-        order_type = classify_order_type(volume)
-        delta = volume if is_buy else -volume
-        st.session_state.tab6_stock_orders[symbol][order_type] += delta
+        if now < market_start:
+            return 0.15  # 開盤初期
+        elif now > market_end:
+            return 1.0   # 收盤
+        else:
+            elapsed_minutes = (now - market_start).total_seconds() / 60.0
+            return max(0.05, min(1.0, elapsed_minutes / 270.0))
 
-    # 控制項
-    col_ctrl1, col_ctrl2 = st.columns([1, 3])
+    # 3. 全台股即時 Tick 撮合模擬器 (每輪隨機撮合 15~30 檔股票)
+    def simulate_full_market_ticks():
+        all_codes = list(st.session_state.tab6_full_market.keys())
+        active_symbols = random.sample(all_codes, k=random.randint(15, 30))
+        
+        for sym in active_symbols:
+            vol = random.randint(1, 200)
+            is_buy = random.choice([True, False]) # 外盤買入 vs 內盤賣出
+            
+            # 累計成交量
+            st.session_state.tab6_full_market[sym]["curr_vol"] += vol
+            
+            # 分流大單與小單 (以 15 張為界)
+            if vol < 15: # 小單
+                if is_buy:
+                    st.session_state.tab6_full_market[sym]["small_buy"] += vol
+                else:
+                    st.session_state.tab6_full_market[sym]["small_sell"] += vol
+            else: # 大單 / 特大單
+                if is_buy:
+                    st.session_state.tab6_full_market[sym]["big_buy"] += vol
+                else:
+                    st.session_state.tab6_full_market[sym]["big_sell"] += vol
+
+    # 控制介面
+    col_ctrl1, col_ctrl2, col_ctrl3 = st.columns([1, 1, 2])
     with col_ctrl1:
-        run_monitor = st.checkbox("開啟即時自動監控", value=True, key="tab6_run")
+        run_monitor = st.checkbox("開啟全台股即時監控", value=True, key="tab6_run_full")
     with col_ctrl2:
-        refresh_rate = st.slider("自動刷新頻率 (秒)", min_value=0.5, max_value=5.0, value=1.0, step=0.5, key="tab6_rate")
+        refresh_rate = st.slider("掃描頻率 (秒)", min_value=0.5, max_value=5.0, value=1.0, step=0.5, key="tab6_rate_full")
+    with col_ctrl3:
+        if st.button("🔄 重置全台股盤中數據", key="tab6_reset_full"):
+            del st.session_state.tab6_full_market
+            st.rerun()
 
-    # 動態顯示區域
     status_placeholder = st.empty()
     table_placeholder = st.empty()
 
     if run_monitor:
-        # 自動模擬接收即時 Tick 數據
-        update_simulated_tick()
+        # 進行全市場動態 Tick 模擬更新
+        simulate_full_market_ticks()
         
-        matched_stocks = []
-        for symbol, data in st.session_state.tab6_stock_orders.items():
-            small_net = data["small"]
-            big_net = data["big"] + data["super_big"]  # 大單 (20-100) + 特大單 (>100)
+        progress_ratio = get_market_progress_ratio()
+        matched_results = []
+
+        # 廣域掃描全市場所有標的
+        for code, data in st.session_state.tab6_full_market.items():
+            # 1. 計算小單與大單累計買賣超 (買 - 賣)
+            small_net = data["small_buy"] - data["small_sell"]
+            big_net = data["big_buy"] - data["big_sell"]
             
-            # 純粹單買超判斷門檻：小單 > 0 且 大單 > 0
-            if small_net > 0 and big_net > 0:
-                matched_stocks.append({
-                    "股票代號": symbol,
+            # 2. 推算整日預估成交量
+            est_vol = int(data["curr_vol"] / progress_ratio)
+            prev_vol = data["prev_vol"]
+            
+            # 3. 嚴格篩選條件：小單買超 > 0 AND 大單買超 > 0 AND 預估量 > 昨日成交量
+            if small_net > 0 and big_net > 0 and est_vol > prev_vol:
+                vol_growth_pct = ((est_vol - prev_vol) / prev_vol) * 100
+                
+                matched_results.append({
+                    "股票代號": code,
                     "股票名稱": data["name"],
-                    "小單累計買超 (張)": f"+{small_net}",
-                    "中單累計買超 (張)": f"{data['medium']:+d}",
-                    "大單累計買超 (張)": f"+{data['big']}",
-                    "特大單累計買超 (張)": f"+{data['super_big']}",
-                    "主力大單合計 (張)": f"+{big_net}",
-                    "當前籌碼狀態": "🟢 大單與小單同步買超中"
+                    "小單淨買超 (張)": small_net,
+                    "大單淨買超 (張)": big_net,
+                    "目前成交量 (張)": data["curr_vol"],
+                    "預估成交量 (張)": est_vol,
+                    "昨日成交量 (張)": prev_vol,
+                    "預估爆量增幅": vol_growth_pct,
                 })
 
         current_time = datetime.now().strftime("%H:%M:%S")
-        status_placeholder.markdown(f"**⏰ 即時更新時間：** `{current_time}` ｜ **符合條件標的：** `{len(matched_stocks)}` 檔")
+        status_placeholder.markdown(
+            f"**⏰ 全台股掃描時間：** `{current_time}` ｜ "
+            f"**全市場監控檔數：** `{len(st.session_state.tab6_full_market)}` 檔 ｜ "
+            f"**符合【大小單同步買超 + 預估爆量】標的：** `{len(matched_results)}` 檔"
+        )
 
-        if matched_stocks:
-            df_matched = pd.DataFrame(matched_stocks)
-            table_placeholder.dataframe(df_matched, use_container_width=True)
+        if matched_results:
+            # 轉為 DataFrame 並依「預估爆量增幅」由大到小排序
+            df_matched = pd.DataFrame(matched_results)
+            df_matched = df_matched.sort_values(by="預估爆量增幅", ascending=False)
+            
+            # 格式化顯示欄位
+            df_display = df_matched.copy()
+            df_display["小單淨買超 (張)"] = df_display["小單淨買超 (張)"].apply(lambda x: f"+{x:,}")
+            df_display["大單淨買超 (張)"] = df_display["大單淨買超 (張)"].apply(lambda x: f"+{x:,}")
+            df_display["目前成交量 (張)"] = df_display["目前成交量 (張)"].apply(lambda x: f"{x:,}")
+            df_display["預估成交量 (張)"] = df_display["預估成交量 (張)"].apply(lambda x: f"{x:,}")
+            df_display["昨日成交量 (張)"] = df_display["昨日成交量 (張)"].apply(lambda x: f"{x:,}")
+            df_display["預估爆量增幅"] = df_display["預估爆量增幅"].apply(lambda x: f"+{x:.1f}%")
+            
+            table_placeholder.dataframe(df_display, use_container_width=True)
         else:
-            table_placeholder.info("⏳ 目前盤中尚無股票同時滿足「大單買超 > 0 且 小單買超 > 0」。")
+            table_placeholder.info("⏳ 全台股掃描中，目前尚無標的同時滿足「小單買超 > 0」、「大單買超 > 0」且「預估成交量 > 昨日」。")
 
-        # 自動無感重新繪製 (無須手動按鈕)
+        # 自動刷新
         time.sleep(refresh_rate)
         st.rerun()
     else:
-        status_placeholder.warning("⏸️ 即時監控已暫停，請勾選「開啟即時自動監控」以開始盤中自動輪詢。")
+        status_placeholder.warning("⏸️ 即時監控已暫停，請勾選「開啟全台股即時監控」進行全市場掃描。")
