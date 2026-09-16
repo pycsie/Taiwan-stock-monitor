@@ -1020,17 +1020,17 @@ with tab6:
                     if (day_vol_shares / 1000.0) < (vol_5ma / 1000.0 * 0.8):
                         continue
 
-                # --- 當沖大/小單累積買超運算核心 ---
-                large_order_threshold = 80  # 單根 K 棒量 > 80 張算大單，<= 80 張算小單
+                # --- 當沖大/小單累積買超運算核心 (向量化優化版) ---
+                large_order_threshold = 80  # 單根 K 棒量 > 80 張算大單，< 80 張算小單
                 
-                df_rt['Direction'] = df_rt.apply(lambda row: 1 if row['Close'] >= row['Open'] else -1, axis=1)
-                df_rt['Vol_Lots'] = df_rt['Volume'] / 1000.0
+                df_rt_calc = df_rt.copy()
+                # 純量化方向判定: 收盤 >= 開盤視為陽線買超 (+1)，反之為陰線賣超 (-1)
+                df_rt_calc['Direction'] = (df_rt_calc['Close'] >= df_rt_calc['Open']).map({True: 1, False: -1})
+                df_rt_calc['Vol_Lots'] = df_rt_calc['Volume'] / 1000.0
 
-                df_large = df_rt[df_rt['Vol_Lots'] >= large_order_threshold]
-                df_small = df_rt[df_rt['Vol_Lots'] < large_order_threshold]
-
-                large_net_buy = (df_large['Vol_Lots'] * df_large['Direction']).sum()
-                small_net_buy = (df_small['Vol_Lots'] * df_small['Direction']).sum()
+                is_large = df_rt_calc['Vol_Lots'] >= large_order_threshold
+                large_net_buy = (df_rt_calc.loc[is_large, 'Vol_Lots'] * df_rt_calc.loc[is_large, 'Direction']).sum()
+                small_net_buy = (df_rt_calc.loc[~is_large, 'Vol_Lots'] * df_rt_calc.loc[~is_large, 'Direction']).sum()
 
                 # 🎯 核心當沖規則：大單與小單必須同時 > 0，堅決排除一買一賣！
                 is_both_buying = (large_net_buy > 0) and (small_net_buy > 0)
